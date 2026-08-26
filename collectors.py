@@ -347,10 +347,13 @@ _TMPA_BASE = "https://thaimaizeandproduce.org/index.php?option=com_content&view=
 
 
 def _tmpa_latest_article_url(cat_html: str) -> str:
-    """หา id บทความมากสุดในหน้า category (=ล่าสุด) -> URL บทความ."""
-    ids = [int(m) for m in re.findall(r"[?&]id=(\d{2,6})(?::|&|\")", cat_html)]
-    # กันจับ id=14 (ตัว category เอง) และ id เล็กผิดปกติ
-    ids = [i for i in ids if i > 100]
+    """หา id บทความมากสุดในหน้า category (=ล่าสุด) -> URL บทความ.
+    ลิงก์บทความ Joomla = id=NNNN:slug (มี ':' ตามด้วย title) — รูปแบบนี้กัน id=14
+    (ตัว category เอง) อัตโนมัติ และทน &amp; (HTML-encoded) เพราะไม่พึ่งตัวอักษรหน้า id="""
+    html = cat_html.replace("&amp;", "&")
+    ids = [int(m) for m in re.findall(r"id=(\d{2,6}):", html)]        # article = id:slug
+    if not ids:                                                       # fallback: id ใดๆ > 100
+        ids = [int(m) for m in re.findall(r"[?&]id=(\d{2,6})", html) if int(m) > 100]
     if not ids:
         raise ValueError("TMPA: หา id บทความล่าสุดไม่เจอ — layout category เปลี่ยน")
     return _TMPA_BASE + str(max(ids))
