@@ -829,8 +829,37 @@ def _fetch_nl_records():
     import os
     csv_url = os.environ.get("NL_SHEET_CSV_URL")
     if csv_url:
-        import pandas as pd
-        return pd.read_csv(csv_url).to_dict("records")
+        import io
+        import csv as _csv
+        import requests
+        r = requests.get(csv_url, timeout=25, headers={"User-Agent": "Mozilla/5.0"})
+        r.raise_for_status()
+        raw = r.content
+        # รองรับ xlsx (zip 'PK') หรือ URL ที่ publish เป็น xlsx -> อ่านด้วย read_excel
+        if raw[:2] == b"PK" or "output=xlsx" in csv_url or "format=xlsx" in csv_url:
+            import pandas as pd
+            df = pd.read_excel(io.BytesIO(raw))
+            cols = [str(c).strip() for c in df.columns]
+            if not ("commodity" in cols and "price_baht_kg" in cols):
+                raise ValueError(f"xlsx ไม่พบคอลัมน์ commodity/price_baht_kg (เจอ: {cols[:6]}) — "
+                                 "ตรวจว่าแท็บ ledger เป็นแท็บแรกของไฟล์")
+            return df.to_dict("records")
+        if raw[:1] == b"\x89" or b"<html" in raw[:400].lower():
+            raise ValueError("NL_SHEET_CSV_URL ไม่ได้คืน CSV/xlsx (ได้ไฟล์ binary/HTML) — "
+                             "ต้องใช้ลิงก์ Publish to web แบบ CSV หรือ xlsx ของแท็บ ledger")
+        text = None
+        for enc in ("utf-8-sig", "utf-8", "cp874", "tis-620", "latin-1"):
+            try:
+                text = raw.decode(enc)
+                break
+            except UnicodeDecodeError:
+                continue
+        reader = _csv.DictReader(io.StringIO(text or ""))
+        cols = [c.strip() for c in (reader.fieldnames or [])]
+        if not ("commodity" in cols and "price_baht_kg" in cols):
+            raise ValueError(f"CSV ไม่พบคอลัมน์ commodity/price_baht_kg (เจอหัวตาราง: {cols[:6]}) — "
+                             "ตรวจว่า URL เป็น Publish-to-web CSV ของแท็บ ledger ที่ถูกต้อง")
+        return list(reader)
     sid = os.environ.get("NL_SHEET_ID")
     creds = os.environ.get("GOOGLE_CREDENTIALS")
     if sid and creds:
