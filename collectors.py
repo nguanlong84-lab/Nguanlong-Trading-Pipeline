@@ -33,6 +33,12 @@ SOURCES = [
     ("cpf_feed_bran",  "CPF รับซื้อ รำขาว",          "thai", "bran",   "scrape","daily",   "THB/kg",  2),
     ("tmpa",         "TMPA ราคาประกาศ",            "thai",  None,      "scrape","daily",   "THB/kg",  2),
     ("dam_level",    "ระดับน้ำเขื่อน (RID)",        "driver",None,      "api",   "daily",   "%",       2),
+    ("nl_buy_corn",  "ง่วนล้ง รับซื้อ ข้าวโพด",       "nguanlong","corn",  "api",   "daily",   "THB/kg",  3),
+    ("nl_sell_corn", "ง่วนล้ง ขาย ข้าวโพด",          "nguanlong","corn",  "api",   "daily",   "THB/kg",  3),
+    ("nl_buy_broken","ง่วนล้ง รับซื้อ ปลายข้าว/ท่อน",  "nguanlong","broken","api",   "daily",   "THB/kg",  3),
+    ("nl_sell_broken","ง่วนล้ง ขาย ปลายข้าว/ท่อน",     "nguanlong","broken","api",   "daily",   "THB/kg",  3),
+    ("nl_buy_bran",  "ง่วนล้ง รับซื้อ รำ",            "nguanlong","bran",  "api",   "daily",   "THB/kg",  3),
+    ("nl_sell_bran", "ง่วนล้ง ขาย รำ",               "nguanlong","bran",  "api",   "daily",   "THB/kg",  3),
     ("burma_corn",   "ข้าวโพดพม่า/ชายแดน",          "driver","corn",    "manual","weekly",  "THB/kg",  2),
 ]
 
@@ -743,6 +749,124 @@ def collect_live_hog():
                          "scope": "national_avg", "regions": regions, "link": post.get("link")})]
 
 
+# ------------------------------------------------------------------
+# ราคาง่วนล้ง (Phase 3) — Google Sheet ledger รายดีล -> รวมรายวัน (฿/kg ถ่วงน้ำหนักตัน)
+# layer='nguanlong' ; แยก buy/sell x commodity ; ราคาอยู่ในคอลัมน์ price_baht_kg แล้ว
+# auth: ตั้ง env อย่างใดอย่างหนึ่ง
+#   NL_SHEET_CSV_URL                  = ลิงก์ CSV (File > Share > Publish to web) — ง่ายสุด
+#   NL_SHEET_ID + GOOGLE_CREDENTIALS  = service account (sheet ยัง private) — ปลอดภัยกว่า
+# คอลัมน์ที่ใช้: timestamp, action(buy/sell), commodity(รำ/ข้าวท่อน/ข้าวโพด), qty_ton, price_baht_kg
+# ------------------------------------------------------------------
+_NL_CACHE = {}
+
+
+def _nl_commodity_code(s):
+    s = str(s)
+    if "โพด" in s:
+        return "corn"
+    if "ท่อน" in s or "ปลาย" in s:
+        return "broken"
+    if "รำ" in s:
+        return "bran"
+    return None
+
+
+def _nl_action(s):
+    s = str(s).strip().lower()
+    if "sell" in s or "ขาย" in s:
+        return "sell"
+    if "buy" in s or "ซื้อ" in s:
+        return "buy"
+    return None
+
+
+def _nl_float(x):
+    try:
+        return float(str(x).replace(",", "").strip())
+    except (ValueError, AttributeError):
+        return None
+
+
+def _nl_date(row):
+    for key in ("timestamp", "date"):
+        v = row.get(key)
+        if v is None or str(v).strip() == "":
+            continue
+        try:
+            return date.fromisoformat(str(v)[:10])
+        except ValueError:
+            continue
+    return None
+
+
+def _parse_nl_ledger(records):
+    """records = list[dict] จาก sheet -> {(code, action): [(obs_date, wavg_price, meta)]}
+    รวมดีลในวันเดียวกันเป็นราคาเฉลี่ยถ่วงน้ำหนักด้วยตัน (fallback เฉลี่ยธรรมดา)."""
+    from collections import defaultdict
+    grp = defaultdict(list)
+    for r in records:
+        code = _nl_commodity_code(r.get("commodity"))
+        act = _nl_action(r.get("action"))
+        price = _nl_float(r.get("price_baht_kg"))
+        d = _nl_date(r)
+        if not code or not act or price is None or d is None:
+            continue
+        ton = _nl_float(r.get("qty_ton")) or 0.0
+        grp[(code, act, d)].append((price, ton))
+    out = defaultdict(list)
+    for (code, act, d), items in grp.items():
+        tot = sum(t for _, t in items)
+        wavg = (sum(p * t for p, t in items) / tot) if tot > 0 else \
+               (sum(p for p, _ in items) / len(items))
+        out[(code, act)].append((d, round(wavg, 3),
+                                 {"src": "nguanlong/ledger", "deals": len(items), "ton": round(tot, 1)}))
+    for k in out:
+        out[k].sort(key=lambda x: x[0])
+    return dict(out)
+
+
+def _fetch_nl_records():
+    import os
+    csv_url = os.environ.get("NL_SHEET_CSV_URL")
+    if csv_url:
+        import pandas as pd
+        return pd.read_csv(csv_url).to_dict("records")
+    sid = os.environ.get("NL_SHEET_ID")
+    creds = os.environ.get("GOOGLE_CREDENTIALS")
+    if sid and creds:
+        import json
+        import gspread
+        from google.oauth2.service_account import Credentials
+        info = json.loads(creds)
+        cr = Credentials.from_service_account_info(
+            info, scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"])
+        ws = gspread.authorize(cr).open_by_key(sid).sheet1
+        return ws.get_all_records()
+    raise NotImplementedError(
+        "ง่วนล้ง sheet: ตั้ง env NL_SHEET_CSV_URL หรือ (NL_SHEET_ID + GOOGLE_CREDENTIALS) ก่อน")
+
+
+def _nl_data():
+    if "d" not in _NL_CACHE:                     # fetch+parse ครั้งเดียวต่อ process (ใช้ร่วม 6 collector)
+        _NL_CACHE["d"] = _parse_nl_ledger(_fetch_nl_records())
+    return _NL_CACHE["d"]
+
+
+def _nl_series(code, action):
+    rows = _nl_data().get((code, action), [])
+    if not rows:
+        raise NotImplementedError(f"ง่วนล้ง: ยังไม่มีดีล {action}/{code} ใน sheet")
+    return rows
+
+
+def collect_nl_buy_corn():    return _nl_series("corn", "buy")
+def collect_nl_sell_corn():   return _nl_series("corn", "sell")
+def collect_nl_buy_broken():  return _nl_series("broken", "buy")
+def collect_nl_sell_broken(): return _nl_series("broken", "sell")
+def collect_nl_buy_bran():    return _nl_series("bran", "buy")
+def collect_nl_sell_bran():   return _nl_series("bran", "sell")
+
+
 # map source_id -> collector callable
 COLLECTORS = {
     "fx_usdthb":       collect_fx_usdthb,
@@ -763,5 +887,11 @@ COLLECTORS = {
     "cpf_feed_bran":   collect_cpf_feed_bran,
     "tmpa":            collect_tmpa,
     "dam_level":       collect_dam_level,
+    "nl_buy_corn":     collect_nl_buy_corn,
+    "nl_sell_corn":    collect_nl_sell_corn,
+    "nl_buy_broken":   collect_nl_buy_broken,
+    "nl_sell_broken":  collect_nl_sell_broken,
+    "nl_buy_bran":     collect_nl_buy_bran,
+    "nl_sell_bran":    collect_nl_sell_bran,
     "burma_corn":      _todo("burma_corn"),
 }
