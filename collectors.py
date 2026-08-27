@@ -22,6 +22,12 @@ SOURCES = [
     ("trea_wr5_fob", "TREA ข้าวขาว 5% FOB",        "world", "broken",  "scrape","weekly",  "USD/ton", 2),
     ("cbot_soymeal", "CBOT Soybean Meal (ZM)",    "world", "bran",    "api",   "daily",   "USD/ton", 2),
     ("cbot_corn_thb_kg","CBOT Corn แปลงเป็น THB/kg","world","corn",    "api",   "daily",   "THB/kg",  2),
+    ("brent_oil",    "Brent Crude (BZ)",          "driver","energy", "api",   "daily",   "USD/bbl", 2),
+    ("wti_oil",      "WTI Crude (CL)",            "driver","energy", "api",   "daily",   "USD/bbl", 2),
+    ("fertilizer_urea","ยูเรีย (World Bank)","driver","fertilizer","scrape","monthly","USD/ton",2),
+    ("cassava_chip", "มันเส้น Chips FOB (TTTA)",   "thai",  "cassava", "scrape","daily",   "THB/kg",  2),
+    ("cpf_livestock","CPF ราคาสัตว์ (ดีมานด์อาหารสัตว์)","thai",None,   "scrape","daily",   "THB/ตัว", 2),
+    ("live_hog",     "สุกรมีชีวิตหน้าฟาร์ม (เฉลี่ยประเทศ)","thai","hog", "scrape","daily",   "THB/kg",  2),
     ("cpf_feed_corn",  "CPF รับซื้อ ข้าวโพดเม็ด",     "thai", "corn",   "scrape","daily",   "THB/kg",  2),
     ("cpf_feed_broken","CPF รับซื้อ ปลายข้าวเจ้า",    "thai", "broken", "scrape","daily",   "THB/kg",  2),
     ("cpf_feed_bran",  "CPF รับซื้อ รำขาว",          "thai", "bran",   "scrape","daily",   "THB/kg",  2),
@@ -493,6 +499,250 @@ def collect_cbot_corn_thb():
     })]
 
 
+# ------------------------------------------------------------------
+# Crude oil — yfinance (Brent BZ=F, WTI CL=F) : driver (freight/ปุ๋ย/ethanol)
+# ------------------------------------------------------------------
+def _collect_yf_price(symbol, lo, hi, extra=None):
+    import yfinance as yf
+    df = yf.Ticker(symbol).history(period="7d", auto_adjust=False)
+    obs, val = _parse_yf_history(df)
+    if not (lo <= val <= hi):
+        raise ValueError(f"{symbol}: {val} นอกช่วง {lo}-{hi}")
+    meta = {"src": "yfinance", "symbol": symbol.replace("=F", "")}
+    if extra:
+        meta.update(extra)
+    return [(obs, val, meta)]
+
+
+def collect_brent_oil():
+    """Brent crude front-month (BZ=F), USD/bbl."""
+    return _collect_yf_price("BZ=F", 20.0, 200.0)
+
+
+def collect_wti_oil():
+    """WTI crude front-month (CL=F), USD/bbl."""
+    return _collect_yf_price("CL=F", 20.0, 200.0)
+
+
+# ------------------------------------------------------------------
+# Fertilizer (urea) — TheGlobalEconomy (ข้อมูล World Bank), รายเดือน + current
+# หน้ามีตาราง label/value: 'Latest value | 400' และ 'Reference | July 2026'
+# เปลี่ยนจาก IndexMundi (เดิม stale/เพี้ยน $725) มาใช้ตัวนี้ที่ตรงกับ World Bank ปัจจุบัน (~$400)
+# ------------------------------------------------------------------
+_UREA_URL = "https://www.theglobaleconomy.com/world/urea_prices/"
+_MON3 = {"jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+         "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12}
+
+
+def _month_year_to_date(s):
+    """'July 2026' / 'Jul 2026' -> date(2026,7,1) (วันที่ 1 ของเดือน)."""
+    if not s:
+        return None
+    m = re.search(r"([A-Za-z]{3,})\s+(\d{4})", s)
+    if m:
+        mon = _MON3.get(m.group(1)[:3].lower())
+        if mon:
+            try:
+                return date(int(m.group(2)), mon, 1)
+            except ValueError:
+                pass
+    return None
+
+
+def _parse_tge_urea(html):
+    """คืน (obs_date, price, ref) จากตาราง label/value ของ TheGlobalEconomy
+    หา row 'Latest value' -> ราคา ; row 'Reference' -> เดือน/ปี."""
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(html, "lxml")
+    value = None
+    ref = None
+    for tr in soup.find_all("tr"):
+        cells = [c.get_text(" ", strip=True) for c in tr.find_all(["td", "th"])]
+        if len(cells) < 2:
+            continue
+        label = cells[0].lower()
+        if "latest value" in label:
+            pm = re.search(r"\d+(?:\.\d+)?", cells[1])
+            if pm:
+                value = float(pm.group())
+        elif "reference" in label:
+            ref = cells[1]
+    if value is None:
+        raise ValueError("urea: หา 'Latest value' ไม่เจอ (TheGlobalEconomy) — layout เปลี่ยน")
+    obs = _month_year_to_date(ref) or _recent_monday()
+    return obs, value, ref
+
+
+def collect_fertilizer_urea():
+    """ราคายูเรีย รายเดือน (World Bank ผ่าน TheGlobalEconomy), USD/ton."""
+    import requests
+    r = requests.get(_UREA_URL, timeout=25, headers={"User-Agent": "Mozilla/5.0"})
+    r.raise_for_status()
+    obs, price, ref = _parse_tge_urea(r.text)
+    if not (100.0 <= price <= 900.0):
+        raise ValueError(f"urea: {price} นอกช่วง 100-900 USD/ton — น่าจะ parse ผิด")
+    return [(obs, price, {"src": "worldbank/theglobaleconomy", "commodity": "urea",
+                          "reference": ref})]
+
+
+# ------------------------------------------------------------------
+# Cassava chips FOB (มันเส้น) — ttta-tapioca.org, corn substitute ในอาหารสัตว์
+# หน้าแรกมีตารางราคา แถว 'มันเส้น Chips' = ช่วงราคา THB/kg (+ USD/ton) + วันที่ dd/mm/yy
+# NOTE: parser best-effort (เห็นค่าแต่ไม่เห็น raw HTML) — ยืนยันครั้งแรกที่รันจริง
+# ------------------------------------------------------------------
+_TTTA_URL = "https://ttta-tapioca.org/?lang=en"
+
+
+def _ttta_date(html):
+    m = re.search(r"(\d{2})/(\d{2})/(\d{2})", html)
+    if m:
+        d, mon, yy = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        try:
+            return date(2000 + yy, mon, d)
+        except ValueError:
+            return None
+    return None
+
+
+def _parse_ttta_chips(html):
+    """คืน (obs_date, thb_per_kg_mid, raw) จากแถว 'มันเส้น/Chips'."""
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(html, "lxml")
+    for tr in soup.find_all("tr"):
+        cells = [c.get_text(" ", strip=True) for c in tr.find_all(["td", "th"])]
+        joined = " ".join(cells)
+        if "มันเส้น" in joined or "chip" in joined.lower():
+            thb = [float(x) for x in re.findall(r"\d+\.\d+", joined) if 3.0 <= float(x) <= 20.0]
+            if thb:
+                mid = round(sum(thb) / len(thb), 3)     # กลางของช่วงราคา
+                return _ttta_date(html) or _recent_monday(), mid, joined
+    raise ValueError("cassava: หาแถว 'มันเส้น/Chips' ไม่เจอ — ตรวจ HTML จริง")
+
+
+def collect_cassava_chip():
+    """ราคามันเส้นส่งออก FOB (กลางของช่วง), THB/kg."""
+    import requests
+    r = requests.get(_TTTA_URL, timeout=25)
+    r.raise_for_status()
+    r.encoding = r.apparent_encoding or "utf-8"
+    obs, price, raw = _parse_ttta_chips(r.text)
+    if not (3.0 <= price <= 20.0):
+        raise ValueError(f"cassava: {price} นอกช่วง 3-20 THB/kg — น่าจะ parse ผิด")
+    return [(obs, price, {"src": "ttta", "commodity": "cassava_chip", "raw": raw})]
+
+
+# ------------------------------------------------------------------
+# CPF livestock — cpffeed.com/animal-price/ : สัญญาณดีมานด์อาหารสัตว์
+# ตารางเดียวกับ CPF material: [ชนิด | สัปดาห์ | วันที่ | ราคา | เปลี่ยน | หน่วย | หมายเหตุ]
+# มีหลายสัตว์ -> เก็บทุกตัวใน meta.items ; value = ราคาลูกไก่เนื้อ (ตัวชี้นำ restock)
+# ------------------------------------------------------------------
+_CPF_ANIMAL_URL = "https://www.cpffeed.com/animal-price/"
+
+
+def _parse_cpf_animals(html):
+    """คืน dict {ชื่อสัตว์: (obs_date, price, raw)} เอาแถววันที่ล่าสุดของแต่ละตัว."""
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(html, "lxml")
+    latest = {}
+    for tr in soup.find_all("tr"):
+        cells = [c.get_text(" ", strip=True) for c in tr.find_all(["td", "th"])]
+        if len(cells) < 4:
+            continue
+        name = cells[0].strip()
+        d = p = None
+        for c in cells:
+            if d is None:
+                mm = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})", c.strip())
+                if mm:
+                    d = date(int(mm[1]), int(mm[2]), int(mm[3]))
+                    continue
+            if d is not None and p is None:
+                mm = re.fullmatch(r"\d{1,6}(?:\.\d+)?", c.strip())
+                if mm:
+                    p = float(c)
+        if name and d is not None and p is not None:
+            if name not in latest or d > latest[name][0]:
+                latest[name] = (d, p, " | ".join(cells))
+    if not latest:
+        raise ValueError("cpf_livestock: parse ตารางสัตว์ไม่เจอ — layout เปลี่ยน")
+    return latest
+
+
+def collect_cpf_livestock():
+    """ราคาสัตว์ CPF (ลูกสุกร/ลูกไก่/ไข่) — สัญญาณดีมานด์อาหารสัตว์.
+    value = ราคาลูกไก่เนื้อ (ถ้ามี) ; meta.items = ทุกชนิด."""
+    import requests
+    r = requests.get(_CPF_ANIMAL_URL, timeout=25)
+    r.raise_for_status()
+    r.encoding = r.apparent_encoding or "utf-8"
+    animals = _parse_cpf_animals(r.text)
+    obs = max(d for d, _, _ in animals.values())
+    items = {name: {"price": p, "date": d.isoformat()} for name, (d, p, _) in animals.items()}
+    headline = next((p for name, (d, p, _) in animals.items() if "ไก่เนื้อ" in name), None)
+    if headline is None:
+        headline = sorted(animals.items())[0][1][1]
+    return [(obs, headline, {"src": "cpffeed", "board": "animal", "items": items})]
+
+
+# ------------------------------------------------------------------
+# สุกรมีชีวิตหน้าฟาร์ม (live hog) — vetproductsgroup ผ่าน WordPress REST API (wp-json)
+# ราคาประกาศรายภาค (text) -> เฉลี่ยเป็นค่าประเทศ. สัญญาณ margin/ดีมานด์อาหารสัตว์
+# NOTE: best-effort (แหล่งข่าว/ประกาศ ไม่ใช่ตาราง) — อาจต้องปรับ parser ถ้า layout เปลี่ยน
+# หมายเหตุ: ไก่เนื้อมีชีวิตของไทย "ไม่มีแหล่ง auto สะอาด" (ดูที่คุยกับ user) -> ยังไม่ทำ
+# ------------------------------------------------------------------
+_VPG_API = ("https://www.vetproductsgroup.com/wp-json/wp/v2/posts"
+            "?search=swine-poultry-price&per_page=1&orderby=date&order=desc")
+_TH_NEXT_COUNTRY = ("จีน", "ลาว", "กัมพูชา", "เวียดนาม", "ฟิลิปปินส์",
+                    "เมียนมา", "พม่า", "อินโดนีเซีย", "มาเลเซีย")
+
+
+def _parse_vpg_hog(content_html, post_date_iso=None):
+    """ดึงราคาสุกรมีชีวิตรายภาคใน section 'ประเทศไทย' -> (obs_date, natl_avg, regions)."""
+    from bs4 import BeautifulSoup
+    text = BeautifulSoup(content_html, "lxml").get_text(" ", strip=True)
+    i = text.find("ประเทศไทย")
+    if i == -1:
+        raise ValueError("live_hog: หา section ประเทศไทย ไม่เจอ — layout เปลี่ยน")
+    seg = text[i:]
+    cut = len(seg)
+    for c in _TH_NEXT_COUNTRY:                       # ตัดก่อนถึงประเทศถัดไป
+        j = seg.find(c, 1)
+        if j != -1:
+            cut = min(cut, j)
+    seg = seg[:cut]
+    prices = []
+    # 'NN.NN – NN.NN ฿ / กก.' หรือ 'NN ฿ / กก.' ; กันลูกสุกร (฿/ตัว) ด้วยหน่วย ก + band
+    for m in re.finditer(r"(\d{2,3}(?:\.\d+)?)\s*(?:[–\-]\s*(\d{2,3}(?:\.\d+)?))?\s*฿\s*/\s*ก", seg):
+        a = float(m.group(1))
+        b = float(m.group(2)) if m.group(2) else a
+        mid = (a + b) / 2
+        if 40 <= mid <= 100:
+            prices.append(round(mid, 2))
+    if not prices:
+        raise ValueError("live_hog: ไม่เจอราคาสุกร ฿/กก. ใน section ไทย")
+    natl = round(sum(prices) / len(prices), 2)
+    obs = _trea_date(text) or (date.fromisoformat(post_date_iso[:10])
+                               if post_date_iso else _recent_monday())
+    return obs, natl, prices
+
+
+def collect_live_hog():
+    """ราคาสุกรมีชีวิตหน้าฟาร์ม เฉลี่ยประเทศ (vetproductsgroup), THB/kg."""
+    import requests
+    r = requests.get(_VPG_API, timeout=25, headers={"User-Agent": "Mozilla/5.0"})
+    r.raise_for_status()
+    data = r.json()
+    if not data:
+        raise ValueError("live_hog: wp-json ไม่คืนโพสต์")
+    post = data[0]
+    content = post.get("content", {}).get("rendered", "")
+    obs, natl, regions = _parse_vpg_hog(content, post.get("date"))
+    if not (30.0 <= natl <= 120.0):
+        raise ValueError(f"live_hog: {natl} นอกช่วง 30-120 THB/kg — น่าจะ parse ผิด")
+    return [(obs, natl, {"src": "vetproductsgroup", "metric": "live_hog_farmgate",
+                         "scope": "national_avg", "regions": regions, "link": post.get("link")})]
+
+
 # map source_id -> collector callable
 COLLECTORS = {
     "fx_usdthb":       collect_fx_usdthb,
@@ -502,6 +752,12 @@ COLLECTORS = {
     "trea_wr5_fob":    collect_trea_wr5_fob,
     "cbot_soymeal":    collect_cbot_soymeal,
     "cbot_corn_thb_kg":collect_cbot_corn_thb,
+    "brent_oil":       collect_brent_oil,
+    "wti_oil":         collect_wti_oil,
+    "fertilizer_urea": collect_fertilizer_urea,
+    "cassava_chip":    collect_cassava_chip,
+    "cpf_livestock":   collect_cpf_livestock,
+    "live_hog":        collect_live_hog,
     "cpf_feed_corn":   collect_cpf_feed_corn,
     "cpf_feed_broken": collect_cpf_feed_broken,
     "cpf_feed_bran":   collect_cpf_feed_bran,
