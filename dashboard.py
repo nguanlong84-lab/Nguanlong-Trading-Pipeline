@@ -29,6 +29,9 @@ LABELS = {
     "wti_oil": "น้ำมัน WTI", "fertilizer_urea": "ยูเรีย", "dam_level": "น้ำเขื่อน %",
     "cpf_livestock": "ลูกไก่เนื้อ (฿/ตัว)", "live_hog": "สุกรมีชีวิต (฿/kg)",
     "burma_corn": "ข้าวโพดชายแดน",
+    "nl_buy_corn": "ง่วนล้ง ซื้อ", "nl_sell_corn": "ง่วนล้ง ขาย",
+    "nl_buy_broken": "ง่วนล้ง ซื้อ", "nl_sell_broken": "ง่วนล้ง ขาย",
+    "nl_buy_bran": "ง่วนล้ง ซื้อ", "nl_sell_bran": "ง่วนล้ง ขาย",
 }
 
 # ------------------------------------------------------------------
@@ -170,6 +173,37 @@ def buyers_bar(obs):
     st.plotly_chart(fig, use_container_width=True)
 
 
+def _last(obs, sid):
+    s = series(obs, sid)
+    return float(s["value"].iloc[-1]) if not s.empty else None
+
+
+def nl_section(obs, buy_sid, sell_sid, market_sid):
+    """ราคาง่วนล้ง ซื้อ/ขาย vs ราคาตลาด + basis (ซื้อ−ตลาด) + margin (ขาย−ซื้อ)."""
+    if series(obs, buy_sid).empty and series(obs, sell_sid).empty:
+        st.info("ยังไม่มีข้อมูลราคาง่วนล้ง — ตั้งค่า Google Sheet (ดูคู่มือ) แล้วรอ pipeline รอบถัดไป")
+        return
+    st.subheader("💠 ราคาง่วนล้ง vs ตลาด (฿/kg)")
+    k = st.columns(3)
+    bf = basis_frame(obs, thai=buy_sid, world=market_sid)   # basis = ง่วนล้งซื้อ − ตลาด
+    with k[0]:
+        if not bf.empty and bf["basis"].notna().any():
+            last = bf.dropna(subset=["basis"]).iloc[-1]
+            st.metric("ซื้อ − ตลาด (฿/kg)", f"{last['basis']:+.2f}",
+                      help="ลบ = ง่วนล้งซื้อถูกกว่าตลาด · บวก = ซื้อแพงกว่า")
+    with k[1]:
+        b, s = _last(obs, buy_sid), _last(obs, sell_sid)
+        if b is not None and s is not None:
+            st.metric("มาร์จิน (ขาย − ซื้อ)", f"{s - b:+.2f}")
+    with k[2]:
+        b = _last(obs, buy_sid)
+        if b is not None:
+            st.metric("ราคาซื้อล่าสุด", f"{b:.2f}")
+    st.plotly_chart(line(obs, [buy_sid, sell_sid, market_sid], "", "฿/kg", height=360),
+                    use_container_width=True)
+    st.caption("เทียบราคาที่ง่วนล้งซื้อ/ขายจริง กับราคาตลาด (CPF) — ดูว่าซื้อได้ต่ำกว่าตลาดแค่ไหน และมาร์จินกว้างพอไหม")
+
+
 def _get_data_or_stop():
     if not os.environ.get("DATABASE_URL"):
         st.error("ไม่พบ DATABASE_URL — ตั้ง env variable ให้ชี้ Postgres ก่อน")
@@ -283,6 +317,8 @@ def page_corn():
                     use_container_width=True)
     st.caption("มันเส้น = สินค้าทดแทนข้าวโพดในอาหารสัตว์ — ถ้าถูกกว่ามาก โรงงานสลับไปใช้ ดีมานด์ข้าวโพดอ่อน")
 
+    nl_section(obs, "nl_buy_corn", "nl_sell_corn", "cpf_feed_corn")
+
     st.subheader("ราคาไทย: CPF vs TMPA (฿/kg)")
     st.plotly_chart(line(obs, ["cpf_feed_corn", "tmpa"], "", "฿/kg"), use_container_width=True)
 
@@ -318,6 +354,8 @@ def page_broken():
         else ("ปลายข้าว A1 (฿/kg)", "—", None)
     kpi_row(lp, [("cpf_feed_broken", "{:.2f}"), a1_kpi, ("trea_a1_fob", "{:.0f}"),
                  ("trea_wr5_fob", "{:.0f}"), ("fx_usdthb", "{:.3f}")])
+
+    nl_section(obs, "nl_buy_broken", "nl_sell_broken", "cpf_feed_broken")
 
     st.divider()
     st.subheader("ปลายข้าวในประเทศ vs ส่งออก A1 (฿/kg เทียบหน่วยเดียว)")
@@ -356,6 +394,8 @@ def page_bran():
         else ("กากถั่ว (฿/kg)", "—", None)
     kpi_row(lp, [("cpf_feed_bran", "{:.2f}"), ("cbot_soymeal", "{:.0f}"), sm_kpi,
                  ("live_hog", "{:.1f}"), ("fx_usdthb", "{:.3f}")])
+
+    nl_section(obs, "nl_buy_bran", "nl_sell_bran", "cpf_feed_bran")
 
     st.divider()
     st.subheader("รำข้าวในกลุ่มวัตถุดิบพลังงาน (฿/kg)")
