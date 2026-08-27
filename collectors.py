@@ -21,6 +21,7 @@ SOURCES = [
     ("trea_a1_fob",  "TREA A1 Super (ปลายข้าว)",   "world", "broken",  "scrape","weekly",  "USD/ton", 2),
     ("trea_wr5_fob", "TREA ข้าวขาว 5% FOB",        "world", "broken",  "scrape","weekly",  "USD/ton", 2),
     ("cbot_soymeal", "CBOT Soybean Meal (ZM)",    "world", "bran",    "api",   "daily",   "USD/ton", 2),
+    ("cbot_corn_thb_kg","CBOT Corn แปลงเป็น THB/kg","world","corn",    "api",   "daily",   "THB/kg",  2),
     ("cpf_feed_corn",  "CPF รับซื้อ ข้าวโพดเม็ด",     "thai", "corn",   "scrape","daily",   "THB/kg",  2),
     ("cpf_feed_broken","CPF รับซื้อ ปลายข้าวเจ้า",    "thai", "broken", "scrape","daily",   "THB/kg",  2),
     ("cpf_feed_bran",  "CPF รับซื้อ รำขาว",          "thai", "bran",   "scrape","daily",   "THB/kg",  2),
@@ -359,38 +360,54 @@ def _tmpa_latest_article_url(cat_html: str) -> str:
     return _TMPA_BASE + str(max(ids))
 
 
+# คำที่บอกว่าแถวไม่ใช่ผู้รับซื้อ (header/สรุป/สินค้าอื่น)
+_TMPA_SKIP = ("ข้าวโพด", "สินค้า", "ราคา", "ถั่ว", "f.o.b", "fob", "หน่วย")
+
+
 def _parse_tmpa_corn(html: str):
-    """หาแถว 'ข้าวโพดเลี้ยงสัตว์' ที่เป็นสรุป (มีทั้งราคา THB/kg 8-16 และ FOB/ton 200-500).
-    คืน (obs_date, price_thb_per_kg, fob_ton_or_None, raw_row)."""
+    """parse บทความ TMPA:
+      - benchmark = แถวสรุป 'ข้าวโพดเลี้ยงสัตว์' ที่มีทั้ง THB/kg (6-16) และ FOB/ton (150-600)
+      - buyers = ตารางผู้รับซื้อรายโรงงาน {ชื่อผู้ซื้อ: ราคา THB/kg} (ราคาอยู่ในช่วง 6-16)
+    คืน (obs_date, benchmark_kg, fob_ton_or_None, buyers_dict, raw_row)."""
     from bs4 import BeautifulSoup
     soup = BeautifulSoup(html, "lxml")
-    corn_kg = None
-    fob = None
-    raw = None
+    corn_kg = fob = raw = None
     fallback = None
+    buyers = {}
     for tr in soup.find_all("tr"):
         cells = [c.get_text(" ", strip=True) for c in tr.find_all(["td", "th"])]
-        joined = " ".join(cells)
-        if "ข้าวโพด" not in joined:
+        if not cells:
             continue
+        joined = " ".join(cells)
         nums = [float(x.replace(",", "")) for x in re.findall(r"\d+(?:\.\d+)?", joined)]
         kg = next((n for n in nums if 6 <= n <= 16), None)
         big = next((n for n in nums if 150 <= n <= 600), None)
-        if kg is not None and fallback is None:
-            fallback = (kg, joined)
-        if kg is not None and big is not None:      # แถวสรุป
-            corn_kg, fob, raw = kg, big, joined
-            break
-    if corn_kg is None and fallback is not None:     # ไม่เจอแถวสรุป ใช้ราคาข้าวโพดแรก
+
+        if "ข้าวโพด" in joined:                          # แถว benchmark/สรุป ของข้าวโพด
+            if kg is not None and fallback is None:
+                fallback = (kg, joined)
+            if kg is not None and big is not None:
+                corn_kg, fob, raw = kg, big, joined
+            continue
+
+        # แถวผู้รับซื้อ: ชื่อผู้ซื้อ (cell แรก) + ราคา THB/kg ช่วง 6-16, ไม่ใช่ header/สินค้าอื่น
+        name = cells[0].strip()
+        low = name.lower()
+        if (kg is not None and name and not name.replace(".", "").isdigit()
+                and not any(w in low for w in _TMPA_SKIP)):
+            buyers[name] = kg
+
+    if corn_kg is None and fallback is not None:         # ไม่เจอแถวสรุป ใช้ราคาข้าวโพดแรก
         corn_kg, raw = fallback
     if corn_kg is None:
         raise ValueError("TMPA: parse ราคาข้าวโพดไม่เจอ — ตรวจ HTML จริง")
     obs = _trea_date(html) or _recent_monday()
-    return obs, corn_kg, fob, raw
+    return obs, corn_kg, fob, buyers, raw
 
 
 def collect_tmpa():
-    """ราคาข้าวโพดเลี้ยงสัตว์ (benchmark) จาก TMPA รายวัน, THB/kg."""
+    """ราคาข้าวโพดเลี้ยงสัตว์ จาก TMPA รายวัน, THB/kg.
+    value = benchmark ; meta.buyers = ราคารับซื้อรายโรงงาน (แยกตามผู้ซื้อ/ทำเล)."""
     import requests
     rc = requests.get(_TMPA_CAT, timeout=25)
     rc.raise_for_status()
@@ -399,12 +416,14 @@ def collect_tmpa():
     ra = requests.get(art_url, timeout=25)
     ra.raise_for_status()
     ra.encoding = ra.apparent_encoding or "utf-8"
-    obs, price, fob, raw = _parse_tmpa_corn(ra.text)
+    obs, price, fob, buyers, raw = _parse_tmpa_corn(ra.text)
     if not (6.0 <= price <= 16.0):
         raise ValueError(f"TMPA: ข้าวโพด {price} นอกช่วง 6-16 THB/kg — น่าจะ parse ผิด")
     meta = {"src": "tmpa", "commodity": "corn", "article": art_url, "raw": raw}
     if fob is not None:
         meta["fob_usd_ton"] = fob
+    if buyers:
+        meta["buyers"] = buyers
     return [(obs, price, meta)]
 
 
@@ -454,6 +473,26 @@ def collect_cbot_soymeal():
     return _collect_cbot("cbot_soymeal")
 
 
+# corn bushel = 56 lb = 25.4012 kg (เฉพาะข้าวโพด; ถั่ว/ข้าวสาลี = 60 lb ต่างกัน)
+_CORN_BUSHEL_KG = 25.4012
+
+
+def collect_cbot_corn_thb():
+    """แปลงราคา CBOT Corn (USd/bu) -> THB/kg ด้วย FX วันนั้น (derived series).
+    สูตร: (cents/100)/25.4012 * (THB/USD). obs_date ใช้ของ ZC (วันเทรดล่าสุด)."""
+    corn = collect_cbot_corn()          # [(date, cents_per_bu, meta)]
+    fx = collect_fx_usdthb()            # [(date, thb_per_usd, meta)]
+    obs, cents, _ = corn[0]
+    _, rate, _ = fx[0]
+    thb_kg = (cents / 100.0) / _CORN_BUSHEL_KG * rate
+    if not (2.0 <= thb_kg <= 30.0):
+        raise ValueError(f"cbot_corn_thb_kg: {thb_kg:.3f} นอกช่วง 2-30 THB/kg — ตรวจหน่วย/FX")
+    return [(obs, round(thb_kg, 4), {
+        "src": "derived", "from": "cbot_corn x fx_usdthb",
+        "cents_per_bu": cents, "fx_thb_usd": rate, "bushel_kg": _CORN_BUSHEL_KG,
+    })]
+
+
 # map source_id -> collector callable
 COLLECTORS = {
     "fx_usdthb":       collect_fx_usdthb,
@@ -462,6 +501,7 @@ COLLECTORS = {
     "trea_a1_fob":     collect_trea_a1_fob,
     "trea_wr5_fob":    collect_trea_wr5_fob,
     "cbot_soymeal":    collect_cbot_soymeal,
+    "cbot_corn_thb_kg":collect_cbot_corn_thb,
     "cpf_feed_corn":   collect_cpf_feed_corn,
     "cpf_feed_broken": collect_cpf_feed_broken,
     "cpf_feed_bran":   collect_cpf_feed_bran,
