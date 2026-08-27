@@ -6,3 +6,6 @@ yfinance
 pandas
 streamlit
 plotly
+gspread
+google-auth
+openpyxl
