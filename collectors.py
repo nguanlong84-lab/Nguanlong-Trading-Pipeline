@@ -784,59 +784,88 @@ def _trm_fetch_pdf():
     raise ValueError("thairicemillers: หา PDF ราคาย้อนหลัง 8 วันไม่เจอ — ตรวจ URL/folder")
 
 
-def _trm_text(pdf_bytes):
+def _trm_norm(s):
+    return re.sub(r"\s+", "", str(s or ""))
+
+
+def _trm_rows(pdf_bytes):
+    """คืน list ของ (text, [numbers]) จากทั้ง extract_tables (ต่อ cell รวมกัน) และ extract_text
+    ทน PDF ไทยที่แยก cell / แทรกช่องว่างได้ดีกว่าอ่าน text อย่างเดียว."""
     import io
     import pdfplumber
-    parts = []
+    rows = []
+    numrx = r"[0-9][0-9,]*(?:\.[0-9]+)?"
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
         for pg in pdf.pages:
-            parts.append(pg.extract_text() or "")
-    return "\n".join(parts)
+            for tbl in (pg.extract_tables() or []):
+                for r in tbl:
+                    cells = [c or "" for c in r]
+                    joined = " ".join(cells)
+                    nums = [float(n.replace(",", "")) for c in cells
+                            for n in re.findall(numrx, c)]
+                    rows.append((joined, nums))
+            for ln in (pg.extract_text() or "").splitlines():
+                nums = [float(n.replace(",", "")) for n in re.findall(numrx, ln)]
+                rows.append((ln, nums))
+    return rows
 
 
-def _trm_price(text, label, exclude=None):
-    """หาแถว label -> ราคา บาท/กก (แปลง /100 ถ้าเป็นราคาต่อ 100 กก). รองรับค่าเดียว/ช่วง."""
-    for line in text.splitlines():
-        if label in line and not (exclude and exclude in line):
-            rest = line.replace(label, "")
-            nums = [float(n.replace(",", "")) for n in
-                    re.findall(r"[0-9][0-9,]*(?:\.[0-9]+)?", rest)]
-            nums = [n for n in nums if n > 0]
-            if not nums:
+def _trm_price_from_rows(rows, label, exclude=None):
+    """จับแถวที่ (ตัดช่องว่างแล้ว) มี label -> ราคา บาท/กก (แปลง /100 ถ้าเป็นต่อ 100 กก)."""
+    key = _trm_norm(label)
+    exc = _trm_norm(exclude) if exclude else None
+    for text, nums in rows:
+        t = _trm_norm(text)
+        if key in t and (not exc or exc not in t):
+            vals = [n for n in nums if 0 < n < 100000]
+            if not vals:
                 continue
-            price = (nums[0] + nums[1]) / 2 if len(nums) >= 2 else nums[0]  # ช่วง -> กลาง
+            price = (vals[0] + vals[1]) / 2 if len(vals) >= 2 else vals[0]
             if price > 100:                     # บาท/100กก -> บาท/กก
                 price /= 100.0
-            return round(price, 3), line.strip()
+            return round(price, 3), text.strip()[:120]
     return None, None
+
+
+def _trm_hint(rows):
+    """ตัวอย่างบรรทัดที่มีคำว่า ข้าว/รำ (ไว้แนบใน error ตอน parse ไม่เจอ)."""
+    seen, out = set(), []
+    for text, _ in rows:
+        t = text.strip()
+        if ("ข้าว" in t or "รำ" in t) and t not in seen:
+            seen.add(t)
+            out.append(t[:45])
+        if len(out) >= 4:
+            break
+    return " ¦ ".join(out) if out else "(ไม่เจอคำว่า ข้าว/รำ เลย — extract อาจเพี้ยน)"
 
 
 def _trm_data():
     if "x" not in _TRM_CACHE:                   # ดาวน์โหลด+อ่าน PDF ครั้งเดียวต่อ process
         d, pdf = _trm_fetch_pdf()
-        _TRM_CACHE["x"] = (d, _trm_text(pdf))
+        _TRM_CACHE["x"] = (d, _trm_rows(pdf))
     return _TRM_CACHE["x"]
 
 
 def collect_trm_broken():
     """ปลายข้าวขาวเอวันเลิศ รายวัน (สมาคมโรงสีข้าวไทย), THB/kg."""
-    d, text = _trm_data()
-    price, raw = _trm_price(text, "ปลายข้าวขาวเอวันเลิศ", exclude="ยิงสี")
+    d, rows = _trm_data()
+    price, raw = _trm_price_from_rows(rows, "ปลายข้าวขาวเอวันเลิศ", exclude="ยิงสี")
     if price is None:
-        raise ValueError("trm_broken: หาแถวปลายข้าวขาวเอวันเลิศไม่เจอ — ตรวจ PDF จริง")
+        raise ValueError(f"trm_broken: หาแถวปลายข้าวไม่เจอ | ที่ดึงได้: {_trm_hint(rows)}")
     if not (5.0 <= price <= 25.0):
-        raise ValueError(f"trm_broken: {price} นอกช่วง 5-25 บาท/กก — น่าจะ parse ผิด")
+        raise ValueError(f"trm_broken: {price} นอกช่วง 5-25 บาท/กก | แถว: {raw}")
     return [(d, price, {"src": "thairicemillers", "grade": "ปลายข้าวขาวเอวันเลิศ", "raw": raw})]
 
 
 def collect_trm_bran():
     """รำข้าวขาว รายวัน (สมาคมโรงสีข้าวไทย), THB/kg."""
-    d, text = _trm_data()
-    price, raw = _trm_price(text, "รำข้าวขาว")
+    d, rows = _trm_data()
+    price, raw = _trm_price_from_rows(rows, "รำข้าวขาว")
     if price is None:
-        raise ValueError("trm_bran: หาแถวรำข้าวขาวไม่เจอ — ตรวจ PDF จริง")
+        raise ValueError(f"trm_bran: หาแถวรำไม่เจอ | ที่ดึงได้: {_trm_hint(rows)}")
     if not (5.0 <= price <= 25.0):
-        raise ValueError(f"trm_bran: {price} นอกช่วง 5-25 บาท/กก — น่าจะ parse ผิด")
+        raise ValueError(f"trm_bran: {price} นอกช่วง 5-25 บาท/กก | แถว: {raw}")
     return [(d, price, {"src": "thairicemillers", "grade": "รำข้าวขาว", "raw": raw})]
 
 
