@@ -788,6 +788,12 @@ def _trm_norm(s):
     return re.sub(r"\s+", "", str(s or ""))
 
 
+def _trm_skel(s):
+    """โครงพยัญชนะไทย (ก 0E01 - ฮ 0E2E) — ตัดสระ/วรรณยุกต์/ช่องว่าง/\\x00 ทิ้ง
+    ทนปัญหา pdfplumber ที่สลับตำแหน่งสระ/วรรณยุกต์ของภาษาไทย."""
+    return "".join(c for c in str(s or "") if "ก" <= c <= "ฮ")
+
+
 def _trm_rows(pdf_bytes):
     """คืน list ของ (text, [numbers]) จากทั้ง extract_tables (ต่อ cell รวมกัน) และ extract_text
     ทน PDF ไทยที่แยก cell / แทรกช่องว่างได้ดีกว่าอ่าน text อย่างเดียว."""
@@ -810,20 +816,21 @@ def _trm_rows(pdf_bytes):
     return rows
 
 
-def _trm_price_from_rows(rows, label, exclude=None):
-    """จับแถวที่ (ตัดช่องว่างแล้ว) มี label -> ราคา บาท/กก (แปลง /100 ถ้าเป็นต่อ 100 กก)."""
-    key = _trm_norm(label)
-    exc = _trm_norm(exclude) if exclude else None
+def _trm_price_from_rows(rows, label):
+    """จับแถวด้วยโครงพยัญชนะ -> ราคา (ช่วงแรกในแถว) แปลง /100 ถ้าเป็นต่อ 100 กก.
+    หมายเหตุ: แถว 'เอวันเลิศ' มีทั้งตัวธรรมดา+ยิงสีในเซลล์เดียว — เอาราคาคู่แรก = ธรรมดา."""
+    key = _trm_skel(label)
+    if not key:
+        return None, None
     for text, nums in rows:
-        t = _trm_norm(text)
-        if key in t and (not exc or exc not in t):
+        if key in _trm_skel(text):
             vals = [n for n in nums if 0 < n < 100000]
             if not vals:
                 continue
             price = (vals[0] + vals[1]) / 2 if len(vals) >= 2 else vals[0]
             if price > 100:                     # บาท/100กก -> บาท/กก
                 price /= 100.0
-            return round(price, 3), text.strip()[:120]
+            return round(price, 3), _trm_norm(text)[:80]
     return None, None
 
 
@@ -850,7 +857,7 @@ def _trm_data():
 def collect_trm_broken():
     """ปลายข้าวขาวเอวันเลิศ รายวัน (สมาคมโรงสีข้าวไทย), THB/kg."""
     d, rows = _trm_data()
-    price, raw = _trm_price_from_rows(rows, "ปลายข้าวขาวเอวันเลิศ", exclude="ยิงสี")
+    price, raw = _trm_price_from_rows(rows, "ปลายข้าวขาวเอวันเลิศ")
     if price is None:
         raise ValueError(f"trm_broken: หาแถวปลายข้าวไม่เจอ | ที่ดึงได้: {_trm_hint(rows)}")
     if not (5.0 <= price <= 25.0):
