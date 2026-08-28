@@ -32,6 +32,7 @@ LABELS = {
     "nl_buy_corn": "ง่วนล้ง ซื้อ", "nl_sell_corn": "ง่วนล้ง ขาย",
     "nl_buy_broken": "ง่วนล้ง ซื้อ", "nl_sell_broken": "ง่วนล้ง ขาย",
     "nl_buy_bran": "ง่วนล้ง ซื้อ", "nl_sell_bran": "ง่วนล้ง ขาย",
+    "trm_broken": "ปลายข้าว (โรงสี รายวัน)", "trm_bran": "รำ (โรงสี รายวัน)",
 }
 
 # ------------------------------------------------------------------
@@ -250,8 +251,9 @@ def page_overview():
             use_container_width=True)
 
     st.subheader("วัตถุดิบอาหารสัตว์ (฿/kg)")
-    st.plotly_chart(line(obs, ["cpf_feed_corn", "cpf_feed_broken", "cpf_feed_bran", "cassava_chip"],
+    st.plotly_chart(line(obs, ["tmpa", "trm_broken", "trm_bran", "cassava_chip"],
                          "", "฿/kg"), use_container_width=True)
+    st.caption("ทุกตัวเป็นราคารายวัน: ข้าวโพด=TMPA · ปลายข้าว/รำ=สมาคมโรงสีข้าวไทย · มันเส้น=TTTA")
 
     buyers_bar(obs)
 
@@ -317,10 +319,11 @@ def page_corn():
                     use_container_width=True)
     st.caption("มันเส้น = สินค้าทดแทนข้าวโพดในอาหารสัตว์ — ถ้าถูกกว่ามาก โรงงานสลับไปใช้ ดีมานด์ข้าวโพดอ่อน")
 
-    nl_section(obs, "nl_buy_corn", "nl_sell_corn", "cpf_feed_corn")
+    nl_section(obs, "nl_buy_corn", "nl_sell_corn", "tmpa")
 
-    st.subheader("ราคาไทย: CPF vs TMPA (฿/kg)")
-    st.plotly_chart(line(obs, ["cpf_feed_corn", "tmpa"], "", "฿/kg"), use_container_width=True)
+    st.subheader("ราคาไทย: TMPA (หลัก, รายวัน) vs CPF (รอง)")
+    st.plotly_chart(line(obs, ["tmpa", "cpf_feed_corn"], "", "฿/kg"), use_container_width=True)
+    st.caption("TMPA อัปเดตทุกวัน (same-day) จึงใช้เป็นราคาตลาดหลัก · CPF โพสต์รายสัปดาห์ ช้ากว่า 2-3 วัน")
 
     buyers_bar(obs)
 
@@ -350,12 +353,17 @@ def page_broken():
     lp = latest_prev_by_source(obs)
 
     a1_thb = usd_ton_to_thb_kg(obs, "trea_a1_fob")
-    a1_kpi = ("ปลายข้าว A1 (฿/kg)", f"{a1_thb['value'].iloc[-1]:.2f}", None) if not a1_thb.empty \
-        else ("ปลายข้าว A1 (฿/kg)", "—", None)
-    kpi_row(lp, [("cpf_feed_broken", "{:.2f}"), a1_kpi, ("trea_a1_fob", "{:.0f}"),
+    a1_kpi = ("ปลายข้าว A1 ส่งออก (฿/kg)", f"{a1_thb['value'].iloc[-1]:.2f}", None) if not a1_thb.empty \
+        else ("ปลายข้าว A1 ส่งออก (฿/kg)", "—", None)
+    kpi_row(lp, [("trm_broken", "{:.2f}"), ("cpf_feed_broken", "{:.2f}"), a1_kpi,
                  ("trea_wr5_fob", "{:.0f}"), ("fx_usdthb", "{:.3f}")])
 
-    nl_section(obs, "nl_buy_broken", "nl_sell_broken", "cpf_feed_broken")
+    nl_section(obs, "nl_buy_broken", "nl_sell_broken", "trm_broken")
+
+    st.subheader("ปลายข้าวในประเทศ: โรงสี (รายวัน) vs CPF (฿/kg)")
+    st.plotly_chart(line(obs, ["trm_broken", "cpf_feed_broken"], "", "฿/kg"),
+                    use_container_width=True)
+    st.caption("โรงสี (สมาคมโรงสีข้าวไทย) = ปลายข้าวเอวันเลิศ รายวัน · CPF = รายสัปดาห์")
 
     st.divider()
     st.subheader("ปลายข้าวในประเทศ vs ส่งออก A1 (฿/kg เทียบหน่วยเดียว)")
@@ -392,20 +400,20 @@ def page_bran():
     sm_thb = usd_ton_to_thb_kg(obs, "cbot_soymeal")
     sm_kpi = ("กากถั่ว (฿/kg)", f"{sm_thb['value'].iloc[-1]:.2f}", None) if not sm_thb.empty \
         else ("กากถั่ว (฿/kg)", "—", None)
-    kpi_row(lp, [("cpf_feed_bran", "{:.2f}"), ("cbot_soymeal", "{:.0f}"), sm_kpi,
-                 ("live_hog", "{:.1f}"), ("fx_usdthb", "{:.3f}")])
+    kpi_row(lp, [("trm_bran", "{:.2f}"), ("cpf_feed_bran", "{:.2f}"), ("cbot_soymeal", "{:.0f}"),
+                 sm_kpi, ("live_hog", "{:.1f}")])
 
-    nl_section(obs, "nl_buy_bran", "nl_sell_bran", "cpf_feed_bran")
+    nl_section(obs, "nl_buy_bran", "nl_sell_bran", "trm_bran")
 
     st.divider()
     st.subheader("รำข้าวในกลุ่มวัตถุดิบพลังงาน (฿/kg)")
-    st.plotly_chart(line(obs, ["cpf_feed_bran", "cpf_feed_corn", "cpf_feed_broken"], "", "฿/kg",
+    st.plotly_chart(line(obs, ["trm_bran", "tmpa", "trm_broken"], "", "฿/kg",
                     height=380), use_container_width=True)
-    st.caption("รำข้าวแข่งกับข้าวโพด/ปลายข้าวเป็นแหล่งพลังงานในสูตรอาหารสัตว์ — ดูราคาสัมพัทธ์กัน")
+    st.caption("รำ (โรงสี รายวัน) แข่งกับข้าวโพด (TMPA)/ปลายข้าวเป็นแหล่งพลังงานในสูตรอาหารสัตว์")
 
     st.subheader("รำ vs กากถั่วเหลือง (โปรตีน, ฿/kg)")
     extra = [("กากถั่วเหลือง (฿/kg)", sm_thb)] if not sm_thb.empty else []
-    st.plotly_chart(line(obs, ["cpf_feed_bran"], "", "฿/kg", extra=extra), use_container_width=True)
+    st.plotly_chart(line(obs, ["trm_bran"], "", "฿/kg", extra=extra), use_container_width=True)
     st.caption("กากถั่วเหลืองแปลงจาก $/short ton ด้วย FX — เป็นตัวเทียบฝั่งโปรตีน")
 
     st.subheader("ดีมานด์ปศุสัตว์ & ปัจจัย")
