@@ -9,3 +9,4 @@ plotly
 gspread
 google-auth
 openpyxl
+pdfplumber
