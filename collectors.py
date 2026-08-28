@@ -31,6 +31,8 @@ SOURCES = [
     ("cpf_feed_corn",  "CPF รับซื้อ ข้าวโพดเม็ด",     "thai", "corn",   "scrape","daily",   "THB/kg",  2),
     ("cpf_feed_broken","CPF รับซื้อ ปลายข้าวเจ้า",    "thai", "broken", "scrape","daily",   "THB/kg",  2),
     ("cpf_feed_bran",  "CPF รับซื้อ รำขาว",          "thai", "bran",   "scrape","daily",   "THB/kg",  2),
+    ("trm_broken",   "ปลายข้าวเอวันเลิศ (โรงสี รายวัน)","thai","broken","scrape","daily",   "THB/kg",  2),
+    ("trm_bran",     "รำข้าวขาว (โรงสี รายวัน)",     "thai",  "bran",   "scrape","daily",   "THB/kg",  2),
     ("tmpa",         "TMPA ราคาประกาศ",            "thai",  None,      "scrape","daily",   "THB/kg",  2),
     ("dam_level",    "ระดับน้ำเขื่อน (RID)",        "driver",None,      "api",   "daily",   "%",       2),
     ("nl_buy_corn",  "ง่วนล้ง รับซื้อ ข้าวโพด",       "nguanlong","corn",  "api",   "daily",   "THB/kg",  3),
@@ -750,6 +752,95 @@ def collect_live_hog():
 
 
 # ------------------------------------------------------------------
+# ปลายข้าว + รำ รายวัน — สมาคมโรงสีข้าวไทย (thairicemillers.org) PDF รายวัน
+# ชื่อไฟล์เดาได้: Pricerice<DDMMYYYY_พ.ศ.>.pdf (เช่น 26 ส.ค. 2026 -> Pricerice26082569.pdf)
+# 1 PDF มีทั้งปลายข้าว (บาท/100กก) และ รำ (บาท/กก) -> แชร์ดาวน์โหลดครั้งเดียว
+# NOTE: cert self-signed -> deploy ใช้ requests verify=False ; parser ทำจาก screenshot ยังไม่ยืนยันสด
+# ------------------------------------------------------------------
+_TRM_FOLDER = "http://thairicemillers.org/images/introc_1429264173"
+_TRM_CACHE = {}
+
+
+def _trm_pdf_url(d):
+    be = d.year + 543
+    return f"{_TRM_FOLDER}/Pricerice{d.day:02d}{d.month:02d}{be}.pdf"
+
+
+def _trm_fetch_pdf():
+    """ลองวันนี้ย้อนหลังไป ~8 วัน (เผื่อวันหยุด) เอา PDF ล่าสุดที่มี -> (obs_date, bytes)."""
+    import requests
+    import urllib3
+    urllib3.disable_warnings()
+    today = date.today()
+    for back in range(0, 8):
+        d = today - timedelta(days=back)
+        try:
+            r = requests.get(_trm_pdf_url(d), timeout=25, verify=False,
+                             allow_redirects=True, headers={"User-Agent": "Mozilla/5.0"})
+            if r.status_code == 200 and r.content[:4] == b"%PDF":
+                return d, r.content
+        except requests.RequestException:
+            continue
+    raise ValueError("thairicemillers: หา PDF ราคาย้อนหลัง 8 วันไม่เจอ — ตรวจ URL/folder")
+
+
+def _trm_text(pdf_bytes):
+    import io
+    import pdfplumber
+    parts = []
+    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+        for pg in pdf.pages:
+            parts.append(pg.extract_text() or "")
+    return "\n".join(parts)
+
+
+def _trm_price(text, label, exclude=None):
+    """หาแถว label -> ราคา บาท/กก (แปลง /100 ถ้าเป็นราคาต่อ 100 กก). รองรับค่าเดียว/ช่วง."""
+    for line in text.splitlines():
+        if label in line and not (exclude and exclude in line):
+            rest = line.replace(label, "")
+            nums = [float(n.replace(",", "")) for n in
+                    re.findall(r"[0-9][0-9,]*(?:\.[0-9]+)?", rest)]
+            nums = [n for n in nums if n > 0]
+            if not nums:
+                continue
+            price = (nums[0] + nums[1]) / 2 if len(nums) >= 2 else nums[0]  # ช่วง -> กลาง
+            if price > 100:                     # บาท/100กก -> บาท/กก
+                price /= 100.0
+            return round(price, 3), line.strip()
+    return None, None
+
+
+def _trm_data():
+    if "x" not in _TRM_CACHE:                   # ดาวน์โหลด+อ่าน PDF ครั้งเดียวต่อ process
+        d, pdf = _trm_fetch_pdf()
+        _TRM_CACHE["x"] = (d, _trm_text(pdf))
+    return _TRM_CACHE["x"]
+
+
+def collect_trm_broken():
+    """ปลายข้าวขาวเอวันเลิศ รายวัน (สมาคมโรงสีข้าวไทย), THB/kg."""
+    d, text = _trm_data()
+    price, raw = _trm_price(text, "ปลายข้าวขาวเอวันเลิศ", exclude="ยิงสี")
+    if price is None:
+        raise ValueError("trm_broken: หาแถวปลายข้าวขาวเอวันเลิศไม่เจอ — ตรวจ PDF จริง")
+    if not (5.0 <= price <= 25.0):
+        raise ValueError(f"trm_broken: {price} นอกช่วง 5-25 บาท/กก — น่าจะ parse ผิด")
+    return [(d, price, {"src": "thairicemillers", "grade": "ปลายข้าวขาวเอวันเลิศ", "raw": raw})]
+
+
+def collect_trm_bran():
+    """รำข้าวขาว รายวัน (สมาคมโรงสีข้าวไทย), THB/kg."""
+    d, text = _trm_data()
+    price, raw = _trm_price(text, "รำข้าวขาว")
+    if price is None:
+        raise ValueError("trm_bran: หาแถวรำข้าวขาวไม่เจอ — ตรวจ PDF จริง")
+    if not (5.0 <= price <= 25.0):
+        raise ValueError(f"trm_bran: {price} นอกช่วง 5-25 บาท/กก — น่าจะ parse ผิด")
+    return [(d, price, {"src": "thairicemillers", "grade": "รำข้าวขาว", "raw": raw})]
+
+
+# ------------------------------------------------------------------
 # ราคาง่วนล้ง (Phase 3) — Google Sheet ledger รายดีล -> รวมรายวัน (฿/kg ถ่วงน้ำหนักตัน)
 # layer='nguanlong' ; แยก buy/sell x commodity ; ราคาอยู่ในคอลัมน์ price_baht_kg แล้ว
 # auth: ตั้ง env อย่างใดอย่างหนึ่ง
@@ -914,6 +1005,8 @@ COLLECTORS = {
     "cpf_feed_corn":   collect_cpf_feed_corn,
     "cpf_feed_broken": collect_cpf_feed_broken,
     "cpf_feed_bran":   collect_cpf_feed_bran,
+    "trm_broken":      collect_trm_broken,
+    "trm_bran":        collect_trm_bran,
     "tmpa":            collect_tmpa,
     "dam_level":       collect_dam_level,
     "nl_buy_corn":     collect_nl_buy_corn,
