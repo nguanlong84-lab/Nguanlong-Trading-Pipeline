@@ -900,7 +900,8 @@ def _nl_action(s):
 
 def _nl_float(x):
     try:
-        return float(str(x).replace(",", "").strip())
+        v = float(str(x).replace(",", "").strip())
+        return None if v != v else v          # กัน NaN (float('nan') ไม่ raise)
     except (ValueError, AttributeError):
         return None
 
@@ -929,15 +930,20 @@ def _parse_nl_ledger(records):
         d = _nl_date(r)
         if not code or not act or price is None or d is None:
             continue
-        ton = _nl_float(r.get("qty_ton")) or 0.0
+        ton = _nl_float(r.get("qty_ton")) or 0.0    # ไม่มีตัน -> 0 (กัน NaN ลง JSON)
         grp[(code, act, d)].append((price, ton))
     out = defaultdict(list)
     for (code, act, d), items in grp.items():
-        tot = sum(t for _, t in items)
-        wavg = (sum(p * t for p, t in items) / tot) if tot > 0 else \
-               (sum(p for p, _ in items) / len(items))
+        tons = [t for _, t in items]
+        tot = sum(tons)
+        # ถ่วงน้ำหนักด้วยตันเมื่อ 'ทุกดีล' มีตัน ; ถ้าดีลไหนไม่มีตัน ใช้เฉลี่ยธรรมดา
+        if all(t > 0 for t in tons):
+            wavg = sum(p * t for p, t in items) / tot
+        else:
+            wavg = sum(p for p, _ in items) / len(items)
         out[(code, act)].append((d, round(wavg, 3),
-                                 {"src": "nguanlong/ledger", "deals": len(items), "ton": round(tot, 1)}))
+                                 {"src": "nguanlong/ledger", "deals": len(items),
+                                  "ton": round(tot, 1)}))
     for k in out:
         out[k].sort(key=lambda x: x[0])
     return dict(out)
