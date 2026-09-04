@@ -41,6 +41,12 @@ SOURCES = [
     ("nl_sell_broken","ง่วนล้ง ขาย ปลายข้าว/ท่อน",     "nguanlong","broken","api",   "daily",   "THB/kg",  3),
     ("nl_buy_bran",  "ง่วนล้ง รับซื้อ รำ",            "nguanlong","bran",  "api",   "daily",   "THB/kg",  3),
     ("nl_sell_bran", "ง่วนล้ง ขาย รำ",               "nguanlong","bran",  "api",   "daily",   "THB/kg",  3),
+    ("nl_buy_bounce","ง่วนล้ง รับซื้อ ท่อนดีด",        "nguanlong","bounce","api",   "daily",   "THB/kg",  3),
+    ("nl_sell_bounce","ง่วนล้ง ขาย ท่อนดีด",          "nguanlong","bounce","api",   "daily",   "THB/kg",  3),
+    ("nl_buy_branmali","ง่วนล้ง รับซื้อ รำมะลิ",       "nguanlong","branmali","api", "daily",   "THB/kg",  3),
+    ("nl_sell_branmali","ง่วนล้ง ขาย รำมะลิ",         "nguanlong","branmali","api", "daily",   "THB/kg",  3),
+    ("nl_buy_pathum","ง่วนล้ง รับซื้อ ต้นปทุม",        "nguanlong","pathum", "api",   "daily",   "THB/kg",  3),
+    ("nl_sell_pathum","ง่วนล้ง ขาย ต้นปทุม",          "nguanlong","pathum", "api",   "daily",   "THB/kg",  3),
     ("burma_corn",   "ข้าวโพดพม่า/ชายแดน",          "driver","corn",    "manual","weekly",  "THB/kg",  2),
 ]
 
@@ -879,10 +885,20 @@ _NL_CACHE = {}
 
 
 def _nl_commodity_code(s):
-    """ระบุชนิดสินค้าจากชื่อ โดยยึด 'คำแรก (ซ้ายสุด)' เป็นสินค้าหลัก
-    รองรับชื่อผสม เช่น 'รำปนปลาย' -> bran (รำเป็นหลัก) ไม่ใช่ broken (ปลาย)
-    'ปลายปนรำ' -> broken (ปลายเป็นหลัก). เดิมไล่เช็ก 'ปลาย' ก่อน 'รำ' เลยตีความผิด."""
+    """ระบุชนิดสินค้าจากชื่อ
+    override (เช็กก่อนเสมอ — ชื่อมีคำหลักของหมวดอื่นปนอยู่ ถ้าไม่ override จะจัดผิด):
+      'ดีด'  -> bounce    (ท่อนดีด — มี 'ท่อน' ปน แต่คนละราคากับปลายข้าว)
+      'มะลิ' -> branmali  (รำมะลิ / ร่ามะลิ(พิมพ์เพี้ยน) — มี 'รำ' ปน แต่เป็นเกรด/ราคาแยกจากรำทั่วไป)
+      'ปทุม' -> pathum    (ต้นปทุม / ต้นข้าวปทุม — คนละตัวกับปลายข้าว)
+    ที่เหลือยึด 'คำแรก (ซ้ายสุด)' เป็นสินค้าหลัก:
+      'รำปนปลาย' -> bran (รำเป็นหลัก) · 'ปลายปนรำ' -> broken (ปลายเป็นหลัก)"""
     s = str(s)
+    if "ดีด" in s:
+        return "bounce"
+    if "มะลิ" in s:
+        return "branmali"
+    if "ปทุม" in s:
+        return "pathum"
     hits = [(s.find(kw), code) for kw, code in
             (("โพด", "corn"), ("ปลาย", "broken"), ("ท่อน", "broken"), ("รำ", "bran"))
             if kw in s]
@@ -1018,6 +1034,85 @@ def collect_nl_buy_broken():  return _nl_series("broken", "buy")
 def collect_nl_sell_broken(): return _nl_series("broken", "sell")
 def collect_nl_buy_bran():    return _nl_series("bran", "buy")
 def collect_nl_sell_bran():   return _nl_series("bran", "sell")
+def collect_nl_buy_bounce():  return _nl_series("bounce", "buy")
+def collect_nl_sell_bounce(): return _nl_series("bounce", "sell")
+def collect_nl_buy_branmali():  return _nl_series("branmali", "buy")
+def collect_nl_sell_branmali(): return _nl_series("branmali", "sell")
+def collect_nl_buy_pathum():    return _nl_series("pathum", "buy")
+def collect_nl_sell_pathum():   return _nl_series("pathum", "sell")
+
+
+# ------------------------------------------------------------------
+# สรุปรายคู่ค้า (supplier mix) — ใช้โดย dashboard หน้า 'สรุปซื้อ-ขาย รายเจ้า'
+# อ่าน ledger ดิบ (ไม่ผ่าน observations) เพราะเป็นมุม 'รายดีล/รายเจ้า' ไม่ใช่ time-series รายวัน
+# ต้องมีคอลัมน์ชื่อคู่ค้าในชีต — รองรับหลายชื่อ (_NL_PARTY_COLS) หรือกำหนดเองผ่าน env NL_PARTY_COL
+# ------------------------------------------------------------------
+_NL_PARTY_COLS = ("counterparty", "party", "supplier", "customer", "vendor",
+                  "คู่ค้า", "แหล่งรับซื้อ", "แหล่งซื้อ", "ผู้ขาย", "ผู้ซื้อ",
+                  "โรงสี", "ลูกค้า", "ร้าน", "ชื่อ", "name")
+
+
+def _nl_party(row):
+    """หาค่าคู่ค้าจากแถว ledger — ลองคอลัมน์ env NL_PARTY_COL ก่อน แล้วค่อยไล่ชื่อที่รู้จัก
+    (เทียบแบบ case/space-insensitive เผื่อหัวตารางพิมพ์ต่างกัน)."""
+    import os
+    prefer = os.environ.get("NL_PARTY_COL")
+    keys = ([prefer] if prefer else []) + list(_NL_PARTY_COLS)
+    low = {str(k).strip().lower(): k for k in row}
+    for cand in keys:
+        if not cand:
+            continue
+        k = low.get(str(cand).strip().lower())
+        if k is not None:
+            v = str(row[k]).strip()
+            if v and v.lower() != "nan":
+                return v
+    return None
+
+
+def nl_party_summary(records=None):
+    """สรุป ledger รายคู่ค้า -> dict:
+      rows: list ต่อ (party, action, commodity) = {party, action, commodity,
+            deals, ton, wavg_price, first_date, last_date}  (ราคาเฉลี่ยถ่วงน้ำหนักตัน)
+      no_party: จำนวนดีลที่ระบุคู่ค้าไม่ได้ (ถูกข้าม)
+      total: จำนวน record ทั้งหมด
+      has_party_col: เจอคอลัมน์คู่ค้าอย่างน้อย 1 ดีลไหม"""
+    from collections import defaultdict
+    if records is None:
+        records = _fetch_nl_records()
+    grp = defaultdict(list)          # (party, act, code) -> [(price, ton, date)]
+    no_party = 0
+    has_party = False
+    for r in records:
+        code = _nl_commodity_code(r.get("commodity"))
+        act = _nl_action(r.get("action"))
+        price = _nl_float(r.get("price_baht_kg"))
+        if not code or not act or price is None:
+            continue
+        party = _nl_party(r)
+        if not party:
+            no_party += 1
+            continue
+        has_party = True
+        ton = _nl_float(r.get("qty_ton")) or 0.0
+        grp[(party, act, code)].append((price, ton, _nl_date(r)))
+    rows = []
+    for (party, act, code), items in grp.items():
+        tons = [t for _, t, _ in items]
+        tot = sum(tons)
+        if all(t > 0 for t in tons) and tot > 0:
+            wavg = sum(p * t for p, t, _ in items) / tot
+        else:
+            wavg = sum(p for p, _, _ in items) / len(items)
+        dates = sorted(d for _, _, d in items if d is not None)
+        rows.append({"party": party, "action": act, "commodity": code,
+                     "deals": len(items), "ton": round(tot, 2),
+                     "wavg_price": round(wavg, 3),
+                     "first_date": dates[0].isoformat() if dates else None,
+                     "last_date": dates[-1].isoformat() if dates else None})
+    rows.sort(key=lambda x: (x["action"], x["commodity"], -x["ton"]))
+    return {"rows": rows, "no_party": no_party, "total": len(records),
+            "has_party_col": has_party}
 
 
 # map source_id -> collector callable
@@ -1048,5 +1143,11 @@ COLLECTORS = {
     "nl_sell_broken":  collect_nl_sell_broken,
     "nl_buy_bran":     collect_nl_buy_bran,
     "nl_sell_bran":    collect_nl_sell_bran,
+    "nl_buy_bounce":   collect_nl_buy_bounce,
+    "nl_sell_bounce":  collect_nl_sell_bounce,
+    "nl_buy_branmali": collect_nl_buy_branmali,
+    "nl_sell_branmali":collect_nl_sell_branmali,
+    "nl_buy_pathum":   collect_nl_buy_pathum,
+    "nl_sell_pathum":  collect_nl_sell_pathum,
     "burma_corn":      _todo("burma_corn"),
 }
