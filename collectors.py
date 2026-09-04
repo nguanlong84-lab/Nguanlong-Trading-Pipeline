@@ -879,14 +879,14 @@ _NL_CACHE = {}
 
 
 def _nl_commodity_code(s):
+    """ระบุชนิดสินค้าจากชื่อ โดยยึด 'คำแรก (ซ้ายสุด)' เป็นสินค้าหลัก
+    รองรับชื่อผสม เช่น 'รำปนปลาย' -> bran (รำเป็นหลัก) ไม่ใช่ broken (ปลาย)
+    'ปลายปนรำ' -> broken (ปลายเป็นหลัก). เดิมไล่เช็ก 'ปลาย' ก่อน 'รำ' เลยตีความผิด."""
     s = str(s)
-    if "โพด" in s:
-        return "corn"
-    if "ท่อน" in s or "ปลาย" in s:
-        return "broken"
-    if "รำ" in s:
-        return "bran"
-    return None
+    hits = [(s.find(kw), code) for kw, code in
+            (("โพด", "corn"), ("ปลาย", "broken"), ("ท่อน", "broken"), ("รำ", "bran"))
+            if kw in s]
+    return min(hits)[1] if hits else None
 
 
 def _nl_action(s):
