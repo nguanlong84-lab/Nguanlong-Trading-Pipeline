@@ -604,45 +604,93 @@ def page_pathum():   _page_nl_only("pathum", "ต้นปทุม", "🌱")
 
 
 @st.cache_data(ttl=600)
-def _load_party_summary():
-    """อ่าน ledger ดิบผ่าน collectors แล้วสรุปรายคู่ค้า (แยกจาก observations)."""
+def _load_deals():
+    """อ่านดีลระดับรายการจาก ledger (ผ่าน collectors) — ให้หน้านี้กรอง/สรุปเอง."""
     import collectors
-    return collectors.nl_party_summary()
+    return collectors.nl_deals()
 
 
-def _party_section(view, act, title, emo, bar_color):
-    sub = view[view["action"] == act]
-    if sub.empty:
+# กลุ่มคู่ค้า (rollup) — เจ้าใหญ่ที่มีหลายสาขา: (ชื่อกลุ่ม, [คีย์เวิร์ดที่พบในชื่อสาขา])
+# ชื่อที่ไม่เข้ากลุ่มใด = นับเป็นกลุ่มของตัวเอง · เพิ่ม/แก้กลุ่มได้ที่นี่ที่เดียว
+PARTY_GROUPS = [
+    ("ซีพี (CP)",         ["ซีพี", "ซี.พี", "ซี พี", "ซีพีเอฟ", "cpf", "cp", "เจริญโภคภัณฑ์"]),
+    ("เบทาโกร (Betagro)", ["เบทาโกร", "เบตาโกร", "betagro"]),
+    ("คาร์กิล (Cargill)", ["คาร์กิล", "คาร์กิลล์", "cargill"]),
+]
+
+_TH_MONTH = {1: "มกราคม", 2: "กุมภาพันธ์", 3: "มีนาคม", 4: "เมษายน", 5: "พฤษภาคม",
+             6: "มิถุนายน", 7: "กรกฎาคม", 8: "สิงหาคม", 9: "กันยายน", 10: "ตุลาคม",
+             11: "พฤศจิกายน", 12: "ธันวาคม"}
+
+
+def _party_group(name):
+    low = str(name).lower()
+    for g, kws in PARTY_GROUPS:
+        if any(k.lower() in low for k in kws):
+            return g
+    return name
+
+
+def _agg_parties(sub, by):
+    """รวมกลุ่มตามคอลัมน์ by -> ton, ราคาเฉลี่ยถ่วงน้ำหนักตัน (wavg), จำนวนสาขา, จำนวนดีล."""
+    s = sub.copy()
+    s["pv"] = s["price"] * s["ton"]
+    g = s.groupby(by, dropna=False).agg(
+        ton=("ton", "sum"), pv=("pv", "sum"), psum=("price", "sum"),
+        deals=("price", "size"), branches=("party", "nunique")).reset_index()
+    g["wavg"] = g.apply(
+        lambda r: (r["pv"] / r["ton"]) if r["ton"] > 0 else (r["psum"] / r["deals"]),
+        axis=1)
+    return g
+
+
+def _party_action_block(sub, act, title, emo, color):
+    s = sub[sub["action"] == act]
+    if s.empty:
         return
-    st.subheader(f"{emo} {title}")
+    st.divider()
+    st.header(f"{emo} {title}")
     k = st.columns(3)
-    k[0].metric("จำนวนเจ้า", f"{sub['party'].nunique()}")
-    k[1].metric("ปริมาณรวม (ตัน)", f"{sub['ton'].sum():,.1f}")
-    k[2].metric("จำนวนดีล", f"{int(sub['deals'].sum())}")
+    k[0].metric("ปริมาณรวม (ตัน)", f"{s['ton'].sum():,.1f}")
+    k[1].metric("จำนวนกลุ่ม/เจ้า", f"{s['group'].nunique()}")
+    k[2].metric("จำนวนดีล", f"{len(s)}")
 
-    show = (sub[["party", "สินค้า", "ton", "wavg_price", "deals", "last_date"]]
-            .rename(columns={"party": "คู่ค้า", "ton": "ปริมาณ (ตัน)",
-                             "wavg_price": "ราคาเฉลี่ย (฿/kg)", "deals": "ดีล",
-                             "last_date": "ล่าสุด"})
-            .sort_values("ปริมาณ (ตัน)", ascending=False))
-    st.dataframe(show, use_container_width=True, hide_index=True)
+    # ----- สรุปรวมรายกลุ่ม (รวมสาขาเข้าด้วยกัน) -----
+    st.subheader("สรุปรวมรายกลุ่ม")
+    grp = _agg_parties(s, ["group"]).sort_values("ton", ascending=False)
+    show = grp.rename(columns={"group": "กลุ่ม", "ton": "ปริมาณ (ตัน)",
+                               "wavg": "ราคาเฉลี่ย (฿/kg)", "branches": "สาขา/เจ้า",
+                               "deals": "ดีล"})
+    show["ปริมาณ (ตัน)"] = show["ปริมาณ (ตัน)"].round(2)
+    show["ราคาเฉลี่ย (฿/kg)"] = show["ราคาเฉลี่ย (฿/kg)"].round(3)
+    st.dataframe(show[["กลุ่ม", "ปริมาณ (ตัน)", "ราคาเฉลี่ย (฿/kg)", "สาขา/เจ้า", "ดีล"]],
+                 use_container_width=True, hide_index=True)
 
-    by_party = (sub.groupby("party", as_index=False)["ton"].sum()
-                .sort_values("ton", ascending=True))
-    fig = go.Figure(go.Bar(x=by_party["ton"], y=by_party["party"],
-                           orientation="h", marker_color=bar_color))
-    fig.update_layout(height=max(240, 30 * len(by_party)), xaxis_title="ปริมาณรวม (ตัน)",
+    gb = grp.sort_values("ton", ascending=True)
+    fig = go.Figure(go.Bar(x=gb["ton"], y=gb["group"], orientation="h", marker_color=color))
+    fig.update_layout(height=max(240, 30 * len(gb)), xaxis_title="ปริมาณรวม (ตัน)",
                       margin=dict(l=10, r=10, t=10, b=10), plot_bgcolor="white", font=dict(color=INK))
     st.plotly_chart(fig, use_container_width=True)
+
+    # ----- รายสาขา/รายเจ้า (ละเอียด) -----
+    with st.expander("ดูรายสาขา/รายเจ้า (ละเอียด)"):
+        det = _agg_parties(s, ["group", "party", "สินค้า"]).sort_values(
+            ["group", "ton"], ascending=[True, False])
+        det = det.rename(columns={"group": "กลุ่ม", "party": "คู่ค้า", "ton": "ปริมาณ (ตัน)",
+                                  "wavg": "ราคาเฉลี่ย (฿/kg)", "deals": "ดีล"})
+        det["ปริมาณ (ตัน)"] = det["ปริมาณ (ตัน)"].round(2)
+        det["ราคาเฉลี่ย (฿/kg)"] = det["ราคาเฉลี่ย (฿/kg)"].round(3)
+        st.dataframe(det[["กลุ่ม", "คู่ค้า", "สินค้า", "ปริมาณ (ตัน)", "ราคาเฉลี่ย (฿/kg)", "ดีล"]],
+                     use_container_width=True, hide_index=True)
 
 
 def page_parties():
     st.title("🤝 สรุปซื้อ–ขาย รายเจ้า")
-    st.caption("รวมทุกดีลจาก ledger จัดกลุ่มตามคู่ค้า — ซื้อจากใคร / ขายให้ใคร ปริมาณเท่าไร ราคาเฉลี่ยเท่าไร "
-               "(อ่านจาก Google Sheet โดยตรง · แยกท่อนดีดออกจากปลายข้าวแล้ว)")
+    st.caption("รวมทุกดีลจาก ledger — ซื้อจากใคร / ขายให้ใคร ปริมาณเท่าไร ราคาเฉลี่ยเท่าไร · "
+               "รวมสาขาของเจ้าใหญ่ (ซีพี/เบทาโกร/คาร์กิล) เป็นกลุ่มเดียว และดูรายสาขาได้")
 
     try:
-        summ = _load_party_summary()
+        data = _load_deals()
     except Exception as e:
         st.error(f"อ่าน ledger ไม่ได้: {e}")
         st.info("หน้านี้อ่านจาก Google Sheet ledger โดยตรง — ต้องตั้ง env `NL_SHEET_CSV_URL` "
@@ -650,39 +698,71 @@ def page_parties():
                 "(service เดียวกับที่ pipeline ใช้)")
         st.stop()
 
-    rows = summ.get("rows", [])
-    if not rows:
-        if not summ.get("has_party_col"):
+    deals = data.get("deals", [])
+    if not deals:
+        if not data.get("has_party_col"):
             st.warning("ยังไม่มีคอลัมน์คู่ค้าใน ledger — เพิ่มคอลัมน์ชื่อคู่ค้า "
-                       "(ตั้งชื่อได้ เช่น `counterparty` หรือ `คู่ค้า` · หรือกำหนดชื่อคอลัมน์เองผ่าน env "
-                       "`NL_PARTY_COL`) แล้วรีเฟรช")
+                       "(เช่น `counterparty` หรือ `คู่ค้า` · หรือกำหนดชื่อคอลัมน์เองผ่าน env `NL_PARTY_COL`)")
         else:
             st.info("ยังไม่มีดีลใน ledger")
         st.stop()
 
-    df = pd.DataFrame(rows)
+    df = pd.DataFrame(deals)
     df["สินค้า"] = df["commodity"].map(lambda c: COMM_TH.get(c, c))
+    df["group"] = df["party"].map(_party_group)
 
-    f = st.columns(2)
-    with f[0]:
+    # ---------- ฟิลเตอร์ ----------
+    fc = st.columns(4)
+    with fc[0]:
+        years = sorted({int(y) for y in df["year"].dropna().tolist()}, reverse=True)
+        yr_sel = st.selectbox("ปี", ["ทั้งหมด"] + years,
+                              format_func=lambda y: "ทั้งหมด" if y == "ทั้งหมด" else f"{y}")
+    with fc[1]:
+        mdf = df if yr_sel == "ทั้งหมด" else df[df["year"] == yr_sel]
+        months = sorted({int(m) for m in mdf["month"].dropna().tolist()})
+        mo_sel = st.selectbox("เดือน", ["ทั้งหมด"] + months,
+                              format_func=lambda m: "ทั้งหมด" if m == "ทั้งหมด" else _TH_MONTH[m])
+    with fc[2]:
         opts = ["ทั้งหมด"] + sorted(df["สินค้า"].unique().tolist())
-        comm_sel = st.selectbox("กรองสินค้า", opts)
-    with f[1]:
-        act_sel = st.selectbox("กรองประเภท", ["ทั้งหมด", "ซื้อ", "ขาย"])
+        comm_sel = st.selectbox("สินค้า", opts)
+    with fc[3]:
+        act_sel = st.selectbox("ประเภท", ["ทั้งหมด", "ซื้อ", "ขาย"])
 
     view = df.copy()
+    if yr_sel != "ทั้งหมด":
+        view = view[view["year"] == yr_sel]
+    if mo_sel != "ทั้งหมด":
+        view = view[view["month"] == mo_sel]
     if comm_sel != "ทั้งหมด":
         view = view[view["สินค้า"] == comm_sel]
     if act_sel != "ทั้งหมด":
         view = view[view["action"] == ("buy" if act_sel == "ซื้อ" else "sell")]
 
-    st.divider()
-    _party_section(view, "buy", "ซื้อจาก (suppliers)", "🟢", OKABE[0])
-    _party_section(view, "sell", "ขายให้ (customers)", "🔵", OKABE[5])
+    period = "ทุกช่วงเวลา"
+    if yr_sel != "ทั้งหมด" and mo_sel != "ทั้งหมด":
+        period = f"{_TH_MONTH[mo_sel]} {yr_sel}"
+    elif yr_sel != "ทั้งหมด":
+        period = f"ปี {yr_sel}"
+    elif mo_sel != "ทั้งหมด":
+        period = f"เดือน{_TH_MONTH[mo_sel]} (ทุกปี)"
+    st.markdown(f"**ช่วงที่ดู:** {period}")
 
-    if summ.get("no_party", 0):
-        st.caption(f"หมายเหตุ: มี {summ['no_party']} ดีลที่ไม่ระบุคู่ค้า จึงไม่ถูกนับในสรุปนี้ "
-                   "(เติมชื่อคู่ค้าในชีตให้ครบเพื่อความแม่นยำ)")
+    if view.empty:
+        st.info("ไม่มีดีลในช่วง/เงื่อนไขที่เลือก")
+        st.stop()
+    if comm_sel == "ทั้งหมด":
+        st.caption("⚠️ กำลังรวมทุกสินค้าเข้าด้วยกัน (ปริมาณเป็นผลรวมข้ามชนิด) — เลือกสินค้าเพื่อดูแยกชนิด")
+
+    _party_action_block(view, "buy", "ซื้อจาก (suppliers)", "🟢", OKABE[0])
+    _party_action_block(view, "sell", "ขายให้ (customers)", "🔵", OKABE[5])
+
+    notes = []
+    if data.get("no_party", 0):
+        notes.append(f"{data['no_party']} ดีลไม่ระบุคู่ค้า (แสดงรวมเป็น '(ไม่ระบุคู่ค้า)')")
+    if data.get("no_commodity", 0):
+        notes.append(f"{data['no_commodity']} ดีลระบุชนิดสินค้าไม่ได้ (ถูกข้าม)")
+    if notes:
+        st.caption("หมายเหตุ: " + " · ".join(notes))
 
 
 def main():
