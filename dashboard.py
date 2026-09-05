@@ -9,6 +9,7 @@ import os
 import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
+import collectors                              # ทะเบียนสินค้า (NL_PRODUCTS) — แหล่งความจริงเดียว
 
 # ------------------------------------------------------------------
 OKABE = ["#0072B2", "#E69F00", "#009E73", "#D55E00",
@@ -29,24 +30,24 @@ LABELS = {
     "wti_oil": "น้ำมัน WTI", "fertilizer_urea": "ยูเรีย", "dam_level": "น้ำเขื่อน %",
     "cpf_livestock": "ลูกไก่เนื้อ (฿/ตัว)", "live_hog": "สุกรมีชีวิต (฿/kg)",
     "burma_corn": "ข้าวโพดชายแดน",
-    "nl_buy_corn": "ง่วนล้ง ซื้อ", "nl_sell_corn": "ง่วนล้ง ขาย",
-    "nl_buy_broken": "ง่วนล้ง ซื้อ", "nl_sell_broken": "ง่วนล้ง ขาย",
-    "nl_buy_bran": "ง่วนล้ง ซื้อ", "nl_sell_bran": "ง่วนล้ง ขาย",
-    "nl_buy_bounce": "ง่วนล้ง ซื้อ", "nl_sell_bounce": "ง่วนล้ง ขาย",
-    "nl_buy_branmali": "ง่วนล้ง ซื้อ", "nl_sell_branmali": "ง่วนล้ง ขาย",
-    "nl_buy_pathum": "ง่วนล้ง ซื้อ", "nl_sell_pathum": "ง่วนล้ง ขาย",
     "trm_broken": "ปลายข้าว (โรงสี รายวัน)", "trm_bran": "รำ (โรงสี รายวัน)",
 }
+# ป้าย nl_* (ซื้อ/ขาย) ทุกสินค้าจากทะเบียน
+for _code, _th, _mkt, _match in collectors.NL_PRODUCTS:
+    LABELS[f"nl_buy_{_code}"] = "ง่วนล้ง ซื้อ"
+    LABELS[f"nl_sell_{_code}"] = "ง่วนล้ง ขาย"
 
-# code สินค้า -> ป้ายไทย (ใช้ในหน้าสรุปรายเจ้า)
-COMM_TH = {"corn": "ข้าวโพด", "broken": "ปลายข้าว/ท่อน", "bran": "รำ",
-           "bounce": "ท่อนดีด", "branmali": "รำมะลิ", "pathum": "ต้นปทุม"}
+# code สินค้า -> ป้ายไทย (ใช้ในหน้าสรุปรายเจ้า) — จากทะเบียน
+COMM_TH = {_code: _th for _code, _th, _mkt, _match in collectors.NL_PRODUCTS}
 
-# สินค้าเฉพาะง่วนล้ง (ไม่มีราคาตลาดอ้างอิงอัตโนมัติ) — (code, ชื่อไทย, ไอคอน)
-# เพิ่มสินค้าใหม่ที่นี่ที่เดียว แล้วหน้าภาพรวม/เมนู/หน้ารายตัวจะขึ้นให้เอง
-NL_ONLY = [("bounce", "ท่อนดีด", "🍙"),
-           ("branmali", "รำมะลิ", "🌾"),
-           ("pathum", "ต้นปทุม", "🌱")]
+# ไอคอนหน้าสินค้าเฉพาะง่วนล้ง (ไม่บังคับ — ไม่กำหนดใช้ 🌾)
+_NL_ICONS = {"bounce": "🍙", "branmali": "🌾", "bran_extract": "🧴",
+             "bran_steam": "♨️", "pathum": "🌱"}
+
+# สินค้าเฉพาะง่วนล้ง (market_sid = None ในทะเบียน) — (code, ชื่อไทย, ไอคอน)
+# เพิ่ม/แก้ได้ที่ NL_PRODUCTS ใน collectors.py ที่เดียว แล้วหน้าภาพรวม/เมนู/หน้ารายตัวขึ้นเอง
+NL_ONLY = [(_code, _th, _NL_ICONS.get(_code, "🌾"))
+           for _code, _th, _mkt, _match in collectors.NL_PRODUCTS if _mkt is None]
 
 # ------------------------------------------------------------------
 # Pure helpers
@@ -598,9 +599,7 @@ def _page_nl_only(code, name, icon):
                "ยังไม่มีราคาตลาดอ้างอิงอัตโนมัติ จึงแสดงเฉพาะราคาซื้อ/ขายของง่วนล้ง")
 
 
-def page_bounce():   _page_nl_only("bounce", "ท่อนดีด", "🍙")
-def page_branmali(): _page_nl_only("branmali", "รำมะลิ", "🌾")
-def page_pathum():   _page_nl_only("pathum", "ต้นปทุม", "🌱")
+def page_bounce():   _page_nl_only("bounce", "ท่อนดีด", "🍙")   # (คงไว้เผื่ออ้างอิง; nav สร้างจาก NL_ONLY)
 
 
 @st.cache_data(ttl=600)
@@ -765,19 +764,27 @@ def page_parties():
         st.caption("หมายเหตุ: " + " · ".join(notes))
 
 
+def _make_nl_page(code, name, icon):
+    return lambda: _page_nl_only(code, name, icon)
+
+
 def main():
     st.set_page_config(page_title="ง่วนล้ง Commodity Dashboard", page_icon="🌾", layout="wide")
-    st.navigation([
+    pages = [
         st.Page(page_overview, title="ภาพรวม", icon="🏠", default=True),
         st.Page(page_corn, title="ข้าวโพด", icon="🌽"),
         st.Page(page_broken, title="ปลายข้าว / ข้าวท่อน", icon="🍚"),
         st.Page(page_bran, title="รำข้าว", icon="🌾"),
-        st.Page(page_bounce, title="ท่อนดีด", icon="🍙"),
-        st.Page(page_branmali, title="รำมะลิ", icon="🌾"),
-        st.Page(page_pathum, title="ต้นปทุม", icon="🌱"),
+    ]
+    # หน้าสินค้าเฉพาะง่วนล้ง สร้างจากทะเบียน NL_ONLY อัตโนมัติ
+    for code, name, icon in NL_ONLY:
+        pages.append(st.Page(_make_nl_page(code, name, icon), title=name, icon=icon,
+                             url_path=f"nl_{code}"))
+    pages += [
         st.Page(page_substitution, title="เทียบวัตถุดิบ", icon="🔄"),
         st.Page(page_parties, title="สรุปรายเจ้า", icon="🤝"),
-    ]).run()
+    ]
+    st.navigation(pages).run()
 
 
 if __name__ == "__main__":
