@@ -1115,6 +1115,43 @@ def nl_party_summary(records=None):
             "has_party_col": has_party}
 
 
+def nl_deals(records=None):
+    """คืนดีลระดับรายการ (normalize แล้ว) ให้ dashboard กรอง/สรุปเอง (ปี/เดือน/กลุ่มคู่ค้า).
+    -> {"deals": [{date, year, month, action, commodity, party, ton, price}],
+        "no_party": จำนวนดีลไม่ระบุคู่ค้า (ยังนับรวมภายใต้ '(ไม่ระบุคู่ค้า)'),
+        "no_commodity": จำนวนดีลที่ระบุชนิดสินค้าไม่ได้ (ถูกข้าม),
+        "total": record ทั้งหมด, "has_party_col": เจอคอลัมน์คู่ค้าไหม}"""
+    if records is None:
+        records = _fetch_nl_records()
+    deals = []
+    no_party = no_commodity = 0
+    has_party = False
+    for r in records:
+        act = _nl_action(r.get("action"))
+        price = _nl_float(r.get("price_baht_kg"))
+        if act is None or price is None:
+            continue
+        code = _nl_commodity_code(r.get("commodity"))
+        if code is None:                       # ชื่อสินค้าไม่เข้าหมวดใด -> ข้าม (ไม่เดา)
+            no_commodity += 1
+            continue
+        party = _nl_party(r)
+        if party:
+            has_party = True
+        else:
+            no_party += 1
+        d = _nl_date(r)
+        ton = _nl_float(r.get("qty_ton")) or 0.0
+        deals.append({"date": d.isoformat() if d else None,
+                      "year": d.year if d else None,
+                      "month": d.month if d else None,
+                      "action": act, "commodity": code,
+                      "party": party or "(ไม่ระบุคู่ค้า)",
+                      "ton": round(ton, 3), "price": price})
+    return {"deals": deals, "no_party": no_party, "no_commodity": no_commodity,
+            "total": len(records), "has_party_col": has_party}
+
+
 # map source_id -> collector callable
 COLLECTORS = {
     "fx_usdthb":       collect_fx_usdthb,
