@@ -9,9 +9,37 @@ from __future__ import annotations
 import re
 from datetime import date, timedelta
 
+# ==================================================================
+# ทะเบียนสินค้าฝั่งง่วนล้ง (ledger)  ★ เพิ่มเกรด/สินค้าใหม่ = เพิ่ม 1 บรรทัดที่นี่ ★
+# แล้วระบบสร้าง source (ซื้อ+ขาย), collector, และหน้า/ป้ายใน dashboard ให้อัตโนมัติ
+#
+# ฟิลด์: (code, ชื่อไทย, market_sid, match)
+#   market_sid = ราคาตลาดอ้างอิงสำหรับเทียบ (None = สินค้าเฉพาะง่วนล้ง ไม่มีตลาดเทียบ)
+#   match      = None -> ใช้กติกา 'คำซ้ายสุด' (_NL_BASE) สำหรับ 3 หมวดฐาน
+#              = [คีย์เวิร์ด,...] -> override เช็กก่อนฐานเสมอ (สำหรับชื่อที่มีคำหลัก
+#                ของหมวดอื่นปน เช่น รำสกัด มี 'รำ' ปน ต้องจับ 'สกัด'/'รำสกัด' ก่อน)
+#   *ใช้คีย์เวิร์ดแบบเจาะจง (เช่น 'รำนึ่ง' ไม่ใช่ 'นึ่ง') กัน 'ปลายข้าวนึ่ง' หลุดมาผิดหมวด*
+# ==================================================================
+NL_PRODUCTS = [
+    # code,          ชื่อไทย,          market_sid,   match (None=ฐาน / list=override)
+    ("corn",         "ข้าวโพด",         "tmpa",       None),
+    ("broken",       "ปลายข้าว/ท่อน",    "trm_broken", None),
+    ("bran",         "รำ",             "trm_bran",   None),
+    ("bounce",       "ท่อนดีด",         None,         ["ท่อนดีด", "ดีด"]),
+    ("branmali",     "รำมะลิ",          None,         ["รำมะลิ", "ร่ามะลิ"]),
+    ("bran_extract", "รำสกัด",          None,         ["รำสกัด", "ร่าสกัด"]),
+    ("bran_steam",   "รำนึ่ง",          None,         ["รำนึ่ง", "ร่านึ่ง"]),
+    ("pathum",       "ต้นปทุม",         None,         ["ต้นปทุม", "ปทุม"]),
+]
+
+# กติกา 'คำซ้ายสุดชนะ' สำหรับ 3 หมวดฐาน (ใช้เมื่อไม่เข้า override ใด)
+_NL_BASE = [("โพด", "corn"), ("ปลาย", "broken"), ("ท่อน", "broken"), ("รำ", "bran")]
+
+
 # ------------------------------------------------------------------
 # ทะเบียนแหล่ง — ตรงกับ workbook (ชีต "สเปกตัวแปร") เฉพาะ external
 # phase: 1 = ทำเลยได้ (API), 2 = ต้อง inspect หน้าเว็บก่อน (scrape)
+# (แถว nl_* ถูกสร้างต่อท้ายอัตโนมัติจาก NL_PRODUCTS — ดูใต้ SOURCES)
 # ------------------------------------------------------------------
 SOURCES = [
     # id,            label,                       layer,   commodity, method,  frequency, unit,     phase
@@ -35,20 +63,15 @@ SOURCES = [
     ("trm_bran",     "รำข้าวขาว (โรงสี รายวัน)",     "thai",  "bran",   "scrape","daily",   "THB/kg",  2),
     ("tmpa",         "TMPA ราคาประกาศ",            "thai",  None,      "scrape","daily",   "THB/kg",  2),
     ("dam_level",    "ระดับน้ำเขื่อน (RID)",        "driver",None,      "api",   "daily",   "%",       2),
-    ("nl_buy_corn",  "ง่วนล้ง รับซื้อ ข้าวโพด",       "nguanlong","corn",  "api",   "daily",   "THB/kg",  3),
-    ("nl_sell_corn", "ง่วนล้ง ขาย ข้าวโพด",          "nguanlong","corn",  "api",   "daily",   "THB/kg",  3),
-    ("nl_buy_broken","ง่วนล้ง รับซื้อ ปลายข้าว/ท่อน",  "nguanlong","broken","api",   "daily",   "THB/kg",  3),
-    ("nl_sell_broken","ง่วนล้ง ขาย ปลายข้าว/ท่อน",     "nguanlong","broken","api",   "daily",   "THB/kg",  3),
-    ("nl_buy_bran",  "ง่วนล้ง รับซื้อ รำ",            "nguanlong","bran",  "api",   "daily",   "THB/kg",  3),
-    ("nl_sell_bran", "ง่วนล้ง ขาย รำ",               "nguanlong","bran",  "api",   "daily",   "THB/kg",  3),
-    ("nl_buy_bounce","ง่วนล้ง รับซื้อ ท่อนดีด",        "nguanlong","bounce","api",   "daily",   "THB/kg",  3),
-    ("nl_sell_bounce","ง่วนล้ง ขาย ท่อนดีด",          "nguanlong","bounce","api",   "daily",   "THB/kg",  3),
-    ("nl_buy_branmali","ง่วนล้ง รับซื้อ รำมะลิ",       "nguanlong","branmali","api", "daily",   "THB/kg",  3),
-    ("nl_sell_branmali","ง่วนล้ง ขาย รำมะลิ",         "nguanlong","branmali","api", "daily",   "THB/kg",  3),
-    ("nl_buy_pathum","ง่วนล้ง รับซื้อ ต้นปทุม",        "nguanlong","pathum", "api",   "daily",   "THB/kg",  3),
-    ("nl_sell_pathum","ง่วนล้ง ขาย ต้นปทุม",          "nguanlong","pathum", "api",   "daily",   "THB/kg",  3),
     ("burma_corn",   "ข้าวโพดพม่า/ชายแดน",          "driver","corn",    "manual","weekly",  "THB/kg",  2),
 ]
+
+# สร้างแถว nl_* (ซื้อ+ขาย) ต่อท้ายอัตโนมัติจากทะเบียน NL_PRODUCTS
+for _code, _th, _mkt, _match in NL_PRODUCTS:
+    SOURCES.append((f"nl_buy_{_code}",  f"ง่วนล้ง รับซื้อ {_th}", "nguanlong", _code,
+                    "api", "daily", "THB/kg", 3))
+    SOURCES.append((f"nl_sell_{_code}", f"ง่วนล้ง ขาย {_th}",    "nguanlong", _code,
+                    "api", "daily", "THB/kg", 3))
 
 def sources_as_dicts():
     keys = ("source_id","label","layer","commodity","method","frequency","unit","phase")
@@ -885,23 +908,18 @@ _NL_CACHE = {}
 
 
 def _nl_commodity_code(s):
-    """ระบุชนิดสินค้าจากชื่อ
-    override (เช็กก่อนเสมอ — ชื่อมีคำหลักของหมวดอื่นปนอยู่ ถ้าไม่ override จะจัดผิด):
-      'ดีด'  -> bounce    (ท่อนดีด — มี 'ท่อน' ปน แต่คนละราคากับปลายข้าว)
-      'มะลิ' -> branmali  (รำมะลิ / ร่ามะลิ(พิมพ์เพี้ยน) — มี 'รำ' ปน แต่เป็นเกรด/ราคาแยกจากรำทั่วไป)
-      'ปทุม' -> pathum    (ต้นปทุม / ต้นข้าวปทุม — คนละตัวกับปลายข้าว)
-    ที่เหลือยึด 'คำแรก (ซ้ายสุด)' เป็นสินค้าหลัก:
-      'รำปนปลาย' -> bran (รำเป็นหลัก) · 'ปลายปนรำ' -> broken (ปลายเป็นหลัก)"""
+    """ระบุชนิดสินค้าจากชื่อ (ขับจากทะเบียน NL_PRODUCTS):
+    1) override — วนตาม NL_PRODUCTS ถ้าเจอคีย์เวิร์ดใน match -> คืน code นั้นทันที
+       (เช็กก่อนฐานเสมอ เพราะชื่อเกรดมักมีคำหลักของหมวดฐานปน เช่น 'รำสกัด' มี 'รำ')
+    2) ฐาน — ยึด 'คำซ้ายสุด' ใน _NL_BASE: 'รำปนปลาย'->bran · 'ปลายปนรำ'->broken
+    คีย์เวิร์ด override เจาะจง (เช่น 'รำนึ่ง' ไม่ใช่ 'นึ่ง') เพื่อกัน 'ปลายข้าวนึ่ง' หลุดมาผิด."""
     s = str(s)
-    if "ดีด" in s:
-        return "bounce"
-    if "มะลิ" in s:
-        return "branmali"
-    if "ปทุม" in s:
-        return "pathum"
-    hits = [(s.find(kw), code) for kw, code in
-            (("โพด", "corn"), ("ปลาย", "broken"), ("ท่อน", "broken"), ("รำ", "bran"))
-            if kw in s]
+    for code, _th, _mkt, match in NL_PRODUCTS:
+        if match:
+            for kw in match:
+                if kw in s:
+                    return code
+    hits = [(s.find(kw), code) for kw, code in _NL_BASE if kw in s]
     return min(hits)[1] if hits else None
 
 
@@ -1028,18 +1046,12 @@ def _nl_series(code, action):
     return rows
 
 
-def collect_nl_buy_corn():    return _nl_series("corn", "buy")
-def collect_nl_sell_corn():   return _nl_series("corn", "sell")
-def collect_nl_buy_broken():  return _nl_series("broken", "buy")
-def collect_nl_sell_broken(): return _nl_series("broken", "sell")
-def collect_nl_buy_bran():    return _nl_series("bran", "buy")
-def collect_nl_sell_bran():   return _nl_series("bran", "sell")
-def collect_nl_buy_bounce():  return _nl_series("bounce", "buy")
-def collect_nl_sell_bounce(): return _nl_series("bounce", "sell")
-def collect_nl_buy_branmali():  return _nl_series("branmali", "buy")
-def collect_nl_sell_branmali(): return _nl_series("branmali", "sell")
-def collect_nl_buy_pathum():    return _nl_series("pathum", "buy")
-def collect_nl_sell_pathum():   return _nl_series("pathum", "sell")
+def _make_nl_collector(code, action):
+    """สร้าง collector สำหรับ nl_<action>_<code> — คืนซีรีส์จาก ledger."""
+    def _f():
+        return _nl_series(code, action)
+    _f.__name__ = f"collect_nl_{action}_{code}"
+    return _f
 
 
 # ------------------------------------------------------------------
@@ -1174,17 +1186,10 @@ COLLECTORS = {
     "trm_bran":        collect_trm_bran,
     "tmpa":            collect_tmpa,
     "dam_level":       collect_dam_level,
-    "nl_buy_corn":     collect_nl_buy_corn,
-    "nl_sell_corn":    collect_nl_sell_corn,
-    "nl_buy_broken":   collect_nl_buy_broken,
-    "nl_sell_broken":  collect_nl_sell_broken,
-    "nl_buy_bran":     collect_nl_buy_bran,
-    "nl_sell_bran":    collect_nl_sell_bran,
-    "nl_buy_bounce":   collect_nl_buy_bounce,
-    "nl_sell_bounce":  collect_nl_sell_bounce,
-    "nl_buy_branmali": collect_nl_buy_branmali,
-    "nl_sell_branmali":collect_nl_sell_branmali,
-    "nl_buy_pathum":   collect_nl_buy_pathum,
-    "nl_sell_pathum":  collect_nl_sell_pathum,
     "burma_corn":      _todo("burma_corn"),
 }
+
+# เพิ่ม collector nl_* (ซื้อ+ขาย) อัตโนมัติจากทะเบียน NL_PRODUCTS
+for _code, _th, _mkt, _match in NL_PRODUCTS:
+    COLLECTORS[f"nl_buy_{_code}"]  = _make_nl_collector(_code, "buy")
+    COLLECTORS[f"nl_sell_{_code}"] = _make_nl_collector(_code, "sell")
