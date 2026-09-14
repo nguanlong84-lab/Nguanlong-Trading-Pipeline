@@ -64,6 +64,36 @@ def haversine_km(lat1, lon1, lat2, lon2) -> float:
     return 2 * R * math.asin(math.sqrt(a))
 
 
+@st.cache_data(ttl=3600)
+def load_distances():
+    """โหลดตารางระยะถนนจริงที่ precompute ไว้ (nl_distances.csv) ถ้ามี.
+    คืน (dict[(flat,flon,tlat,tlon)] -> km, provider_label|None)."""
+    path = os.path.join(_HERE, "nl_distances.csv")
+    if not os.path.exists(path):
+        return {}, None
+    df = pd.read_csv(path)
+    prov = str(df["source"].iloc[0]) if "source" in df.columns and len(df) else "road"
+    d = {}
+    for r in df.itertuples(index=False):
+        d[(round(r.from_lat, 5), round(r.from_lon, 5),
+           round(r.to_lat, 5), round(r.to_lon, 5))] = float(r.km)
+    return d, prov
+
+
+def road_km(dist, src, dst, road_factor):
+    """คืน (ระยะทาง กม., is_real) — ใช้ระยะถนนจริงจากตารางถ้ามี ไม่งั้น fallback เส้นตรง×factor.
+    ระยะถนนถือว่าสมมาตร (A->B ≈ B->A) จึงลองคีย์กลับด้วย."""
+    if dist:
+        k = (round(src["lat"], 5), round(src["lon"], 5),
+             round(dst["lat"], 5), round(dst["lon"], 5))
+        if k in dist:
+            return dist[k], True
+        rk = (k[2], k[3], k[0], k[1])
+        if rk in dist:
+            return dist[rk], True
+    return haversine_km(src["lat"], src["lon"], dst["lat"], dst["lon"]) * road_factor, False
+
+
 # ------------------------------------------------------------------
 # Commodity — จัดกลุ่มกว้าง (ใช้ 'กรอง' dropdown เท่านั้น ไม่บังคับจับคู่)
 # ตรงกับ 3 หน้าหลักของ dashboard: ข้าวโพด / ปลายข้าว-ท่อน / รำ
@@ -197,26 +227,25 @@ def route_map(src, dst, margin):
 # ------------------------------------------------------------------
 # Ranking (anchored)
 # ------------------------------------------------------------------
-def rank_lanes(anchor, others, buy_price, truck, road_factor, anchor_is_buy):
+def rank_lanes(anchor, others, buy_price, truck, road_factor, anchor_is_buy, dist=None):
     rows = []
     for _, o in others.iterrows():
         if pd.isna(o["lat"]) or pd.isna(o["lon"]):
             continue
-        km = haversine_km(anchor["lat"], anchor["lon"], o["lat"], o["lon"]) * road_factor
+        src_pt, dst_pt = (anchor, o) if anchor_is_buy else (o, anchor)
+        km, is_real = road_km(dist, src_pt, dst_pt, road_factor)
         rate, over = transport_rate(km, truck)
         if anchor_is_buy:
             landed = buy_price + rate
             margin = o["price"] - landed
-            name, price = o["counterparty"], o["price"]
         else:
             landed = o["price"] + rate
             margin = anchor["price"] - landed
-            name, price = o["counterparty"], o["price"]
-        rows.append({"คู่ค้า": name, "สินค้า": o["commodity"], "จังหวัด": o.get("province"),
-                     "ราคา (฿)": round(price, 2), "ระยะ (กม.)": round(km),
-                     "ค่าขนส่ง (฿)": rate, "ราคาสุทธิ (฿)": round(landed, 2),
-                     "margin (฿/กก.)": round(margin, 2),
-                     "เกินตาราง": "⚠️" if over else ""})
+        rows.append({"คู่ค้า": o["counterparty"], "สินค้า": o["commodity"],
+                     "จังหวัด": o.get("province"), "ราคา (฿)": round(o["price"], 2),
+                     "ระยะ (กม.)": round(km), "ค่าขนส่ง (฿)": rate,
+                     "ราคาสุทธิ (฿)": round(landed, 2), "margin (฿/กก.)": round(margin, 2),
+                     "": ("⚠️" if over else "") + ("" if is_real else "~")})
     if not rows:
         return pd.DataFrame()
     return pd.DataFrame(rows).sort_values("margin (฿/กก.)", ascending=False).reset_index(drop=True)
@@ -233,6 +262,7 @@ def page_logistics():
 
     locs = load_locations()
     deals = load_deals()
+    dist, dist_src = load_distances()
     buys = priced_points(deals, locs, "buy")
     sells = priced_points(deals, locs, "sell")
     if buys.empty or sells.empty:
@@ -306,9 +336,13 @@ def page_logistics():
         st.stop()
 
     straight = haversine_km(src["lat"], src["lon"], dst["lat"], dst["lon"])
-    est_km = straight * road_factor
+    auto_km, is_real = road_km(dist, src, dst, road_factor)
     if manual:
-        est_km = st.number_input("ระยะทาง (กม.)", value=float(round(est_km)), step=5.0)
+        est_km = st.number_input("ระยะทาง (กม.)", value=float(round(auto_km)), step=5.0)
+        dist_note = "กำหนดเอง"
+    else:
+        est_km = auto_km
+        dist_note = ("ถนนจริง " + (dist_src or "road")) if is_real else "ประมาณจากเส้นตรง × ตัวคูณ"
 
     rate, over = transport_rate(est_km, truck)
     landed = buy_price + rate
@@ -325,7 +359,7 @@ def page_logistics():
     st.divider()
     m = st.columns(5)
     m[0].metric("ระยะทาง", f"{est_km:,.0f} กม." + (" ⚠️" if over else ""),
-                help="เส้นตรง × ตัวคูณถนน" + (" · เกินตาราง 700 กม. เป็นประมาณการ" if over else ""))
+                help=f"{dist_note}" + (" · เกินตาราง 700 กม. เป็นประมาณการ" if over else ""))
     m[1].metric("ค่าขนส่ง", f"{rate:.2f} ฿/กก.", help=f"{truck} · ตามช่วงระยะทาง")
     m[2].metric("ราคาสุทธิถึงปลายทาง", f"{landed:.2f} ฿/กก.", help="ราคาซื้อ + ค่าขนส่ง")
     m[3].metric("margin", f"{margin:+.2f} ฿/กก.",
@@ -342,8 +376,13 @@ def page_logistics():
                  f"ขาดทุน **{margin:.2f}** ฿/กก.")
 
     st.plotly_chart(route_map(src, dst, margin), use_container_width=True)
-    st.caption(f"เส้นตรง {straight:,.0f} กม. → ประเมินระยะถนน {est_km:,.0f} กม. · "
-               f"อัตราค่าขนส่งอ้างอิงตาราง (ฐานน้ำมัน 37.50 บาท/ลิตร, 1 ก.ค. 2569)")
+    if is_real and not manual:
+        st.caption(f"เส้นตรง {straight:,.0f} กม. · **ระยะถนนจริง {est_km:,.0f} กม. ({dist_src})** · "
+                   f"อัตราค่าขนส่งอ้างอิงตาราง (ฐานน้ำมัน 37.50 บาท/ลิตร, 1 ก.ค. 2569)")
+    else:
+        st.caption(f"เส้นตรง {straight:,.0f} กม. → ประเมินระยะถนน {est_km:,.0f} กม. "
+                   f"(× ตัวคูณ {road_factor:.2f}) · ยังไม่มีตารางระยะจริง — รัน build_distances.py "
+                   f"เพื่อใช้ระยะ Google · อัตราค่าขนส่งอ้างอิงตาราง")
 
     # ---- Anchored rankings ----
     st.divider()
@@ -355,7 +394,7 @@ def page_logistics():
     with t1:
         st.caption(f"ตรึงต้นทาง **{src['counterparty']}** (ซื้อ {buy_price:.2f}฿) · "
                    f"เทียบขายทุกโรงงานในกลุ่มเดียวกัน หัก {truck}")
-        r = rank_lanes(src, same_cls_sells, buy_price, truck, road_factor, anchor_is_buy=True)
+        r = rank_lanes(src, same_cls_sells, buy_price, truck, road_factor, anchor_is_buy=True, dist=dist)
         if r.empty:
             st.info("ไม่มีปลายทางในกลุ่มสินค้าเดียวกัน")
         else:
@@ -363,7 +402,7 @@ def page_logistics():
     with t2:
         st.caption(f"ตรึงปลายทาง **{dst['counterparty']}** (ขาย {sell_price:.2f}฿) · "
                    f"เทียบซื้อทุกโรงสีในกลุ่มเดียวกัน หัก {truck}")
-        r = rank_lanes(dst, same_cls_buys, None, truck, road_factor, anchor_is_buy=False)
+        r = rank_lanes(dst, same_cls_buys, None, truck, road_factor, anchor_is_buy=False, dist=dist)
         if r.empty:
             st.info("ไม่มีต้นทางในกลุ่มสินค้าเดียวกัน")
         else:
