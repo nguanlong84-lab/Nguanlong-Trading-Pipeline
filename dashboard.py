@@ -10,6 +10,7 @@ import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 import collectors                              # ทะเบียนสินค้า (NL_PRODUCTS) — แหล่งความจริงเดียว
+from logistics_pricing import page_logistics   # หน้าโลจิสติกส์ / คิดราคาส่ง
 
 # ------------------------------------------------------------------
 OKABE = ["#0072B2", "#E69F00", "#009E73", "#D55E00",
@@ -783,6 +784,7 @@ def main():
     pages += [
         st.Page(page_substitution, title="เทียบวัตถุดิบ", icon="🔄"),
         st.Page(page_parties, title="สรุปรายเจ้า", icon="🤝"),
+        st.Page(page_logistics, title="โลจิสติกส์ / ราคาส่ง", icon="🚚"),
     ]
     st.navigation(pages).run()
 
