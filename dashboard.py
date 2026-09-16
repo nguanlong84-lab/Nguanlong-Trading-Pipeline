@@ -43,7 +43,7 @@ COMM_TH = {_code: _th for _code, _th, _mkt, _match in collectors.NL_PRODUCTS}
 
 # ไอคอนหน้าสินค้าเฉพาะง่วนล้ง (ไม่บังคับ — ไม่กำหนดใช้ 🌾)
 _NL_ICONS = {"bounce": "🍙", "branmali": "🌾", "bran_extract": "🧴",
-             "bran_steam": "♨️", "pathum": "🌱"}
+             "bran_steam": "♨️", "pathum": "🌱", "wr5": "🍚"}
 
 # สินค้าเฉพาะง่วนล้ง (market_sid = None ในทะเบียน) — (code, ชื่อไทย, ไอคอน)
 # เพิ่ม/แก้ได้ที่ NL_PRODUCTS ใน collectors.py ที่เดียว แล้วหน้าภาพรวม/เมนู/หน้ารายตัวขึ้นเอง
