@@ -688,6 +688,18 @@ def _party_action_block(sub, act, title, emo, color):
                      use_container_width=True, hide_index=True)
 
 
+def _deal_history(view):
+    """ตารางประวัติดีลรายรายการ เรียงวันล่าสุดก่อน (ใช้ในหน้าสรุปรายเจ้า)."""
+    h = view.sort_values("dt", ascending=False, na_position="last").copy()
+    h["วันที่"] = h["dt"].dt.strftime("%Y-%m-%d")
+    h["วันที่"] = h["วันที่"].where(h["dt"].notna(), "—")
+    h["ประเภท"] = h["action"].map({"buy": "🟢 ซื้อ", "sell": "🔵 ขาย"})
+    h["ปริมาณ (ตัน)"] = h["ton"].round(3)
+    h["ราคา (฿/kg)"] = h["price"].round(3)
+    h = h.rename(columns={"party": "คู่ค้า", "group": "กลุ่ม"})
+    return h[["วันที่", "ประเภท", "กลุ่ม", "คู่ค้า", "สินค้า", "ปริมาณ (ตัน)", "ราคา (฿/kg)"]]
+
+
 def page_parties():
     st.title("🤝 สรุปซื้อ–ขาย รายเจ้า")
     st.caption("รวมทุกดีลจาก ledger — ซื้อจากใคร / ขายให้ใคร ปริมาณเท่าไร ราคาเฉลี่ยเท่าไร · "
@@ -714,51 +726,72 @@ def page_parties():
     df = pd.DataFrame(deals)
     df["สินค้า"] = df["commodity"].map(lambda c: COMM_TH.get(c, c))
     df["group"] = df["party"].map(_party_group)
+    df["dt"] = pd.to_datetime(df["date"], errors="coerce")   # วันที่เต็มต่อดีล (จาก nl_deals)
 
     # ---------- ฟิลเตอร์ ----------
-    fc = st.columns(4)
+    fc = st.columns(3)
     with fc[0]:
-        years = sorted({int(y) for y in df["year"].dropna().tolist()}, reverse=True)
-        yr_sel = st.selectbox("ปี", ["ทั้งหมด"] + years,
-                              format_func=lambda y: "ทั้งหมด" if y == "ทั้งหมด" else f"{y}")
+        party_opts = ["ทั้งหมด"] + sorted(df["party"].dropna().unique().tolist())
+        party_sel = st.selectbox("เจ้า / คู่ค้า", party_opts,
+                                 help="เลือกเจ้าเดียวเพื่อดูประวัติดีลย้อนหลังของเจ้านั้น")
     with fc[1]:
-        mdf = df if yr_sel == "ทั้งหมด" else df[df["year"] == yr_sel]
-        months = sorted({int(m) for m in mdf["month"].dropna().tolist()})
-        mo_sel = st.selectbox("เดือน", ["ทั้งหมด"] + months,
-                              format_func=lambda m: "ทั้งหมด" if m == "ทั้งหมด" else _TH_MONTH[m])
+        comm_sel = st.selectbox("สินค้า", ["ทั้งหมด"] + sorted(df["สินค้า"].unique().tolist()))
     with fc[2]:
-        opts = ["ทั้งหมด"] + sorted(df["สินค้า"].unique().tolist())
-        comm_sel = st.selectbox("สินค้า", opts)
-    with fc[3]:
         act_sel = st.selectbox("ประเภท", ["ทั้งหมด", "ซื้อ", "ขาย"])
 
+    has_dt = df["dt"].notna().any()
+    date_range = None
+    if has_dt:
+        dmin, dmax = df["dt"].min().date(), df["dt"].max().date()
+        date_range = st.date_input("ช่วงวันที่", value=(dmin, dmax),
+                                   min_value=dmin, max_value=dmax)
+
+    # ---------- ใช้ฟิลเตอร์ ----------
     view = df.copy()
-    if yr_sel != "ทั้งหมด":
-        view = view[view["year"] == yr_sel]
-    if mo_sel != "ทั้งหมด":
-        view = view[view["month"] == mo_sel]
+    if party_sel != "ทั้งหมด":
+        view = view[view["party"] == party_sel]
     if comm_sel != "ทั้งหมด":
         view = view[view["สินค้า"] == comm_sel]
     if act_sel != "ทั้งหมด":
         view = view[view["action"] == ("buy" if act_sel == "ซื้อ" else "sell")]
+    if has_dt and isinstance(date_range, (tuple, list)) and len(date_range) == 2:
+        d0, d1 = date_range
+        view = view[(view["dt"].dt.date >= d0) & (view["dt"].dt.date <= d1)]
 
-    period = "ทุกช่วงเวลา"
-    if yr_sel != "ทั้งหมด" and mo_sel != "ทั้งหมด":
-        period = f"{_TH_MONTH[mo_sel]} {yr_sel}"
-    elif yr_sel != "ทั้งหมด":
-        period = f"ปี {yr_sel}"
-    elif mo_sel != "ทั้งหมด":
-        period = f"เดือน{_TH_MONTH[mo_sel]} (ทุกปี)"
-    st.markdown(f"**ช่วงที่ดู:** {period}")
+    if has_dt and isinstance(date_range, (tuple, list)) and len(date_range) == 2:
+        period = f"{date_range[0]:%Y-%m-%d} – {date_range[1]:%Y-%m-%d}"
+    else:
+        period = "ทุกช่วงเวลา"
+    st.markdown(f"**ช่วงที่ดู:** {period}" +
+                (f" · **เจ้า:** {party_sel}" if party_sel != "ทั้งหมด" else ""))
 
     if view.empty:
         st.info("ไม่มีดีลในช่วง/เงื่อนไขที่เลือก")
         st.stop()
+
+    # ---------- ประวัติดีลของเจ้าที่เลือก (ดูย้อนหลังรายดีล) ----------
+    if party_sel != "ทั้งหมด":
+        st.divider()
+        st.subheader(f"📜 ประวัติดีล — {party_sel}")
+        b, s = view[view["action"] == "buy"], view[view["action"] == "sell"]
+        k = st.columns(4)
+        k[0].metric("ดีลซื้อ", f"{len(b)}")
+        k[1].metric("ปริมาณซื้อ (ตัน)", f"{b['ton'].sum():,.1f}")
+        k[2].metric("ดีลขาย", f"{len(s)}")
+        k[3].metric("ปริมาณขาย (ตัน)", f"{s['ton'].sum():,.1f}")
+        st.dataframe(_deal_history(view), use_container_width=True, hide_index=True)
+
     if comm_sel == "ทั้งหมด":
         st.caption("⚠️ กำลังรวมทุกสินค้าเข้าด้วยกัน (ปริมาณเป็นผลรวมข้ามชนิด) — เลือกสินค้าเพื่อดูแยกชนิด")
 
     _party_action_block(view, "buy", "ซื้อจาก (suppliers)", "🟢", OKABE[0])
     _party_action_block(view, "sell", "ขายให้ (customers)", "🔵", OKABE[5])
+
+    # ---------- ประวัติดีลทั้งหมดในช่วง (ตอนดูรวมทุกเจ้า) ----------
+    if party_sel == "ทั้งหมด":
+        with st.expander(f"📜 ประวัติดีลทั้งหมดในช่วงที่เลือก ({len(view)} ดีล)"):
+            st.dataframe(_deal_history(view), use_container_width=True, hide_index=True)
+
 
     notes = []
     if data.get("no_party", 0):
